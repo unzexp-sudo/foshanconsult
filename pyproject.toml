@@ -1,0 +1,52 @@
+[project]
+name = "booking-service"
+version = "0.1.0"
+description = "Paid 1-1 call booking with Google Calendar availability and WeChat Pay Native settlement"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy>=2.0.36",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "email-validator>=2.2",
+    "jinja2>=3.1",
+    "httpx>=0.27",
+    "cryptography>=43.0",
+    "segno>=1.6",
+    "celery>=5.4",
+    "redis>=5.2",
+    "python-multipart>=0.0.12",
+    "google-api-python-client>=2.149",
+    "google-auth>=2.36",
+    "google-auth-oauthlib>=1.2",
+    "psycopg[binary]>=3.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "freezegun>=1.5",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app", "relay"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]
