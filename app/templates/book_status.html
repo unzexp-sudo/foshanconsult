@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% block title %}支付与预约状态 · 知托源{% endblock %}
+
+{% block content %}
+<main id="book-status"
+      data-reference="{{ booking.reference }}"
+      data-state="{{ state }}"
+      data-expires-at="{{ expires_at_iso }}">
+
+  <header class="page-head">
+    <p class="eyebrow">订单 {{ booking.reference }}</p>
+    <h1 id="state-title">{% if state == 'paid' %}预约已确认{% elif state == 'dead' %}预约已失效{% else %}等待支付{% endif %}</h1>
+    <p class="lede" id="state-lede">{% if state == 'paid' %}我们已收到你的付款，确认邮件与日历邀请已发送。{% elif state == 'dead' %}{{ dead_reason }}{% else %}请在倒计时结束前使用微信扫码完成支付。{% endif %}</p>
+  </header>
+
+  <p class="live" id="live-region" role="status" aria-live="polite"></p>
+
+  {% if state == 'pending' %}
+  <section class="card state" id="state-pending">
+    {% if qr_svg %}
+    <div class="qr" id="qr-slot">{{ qr_svg | safe }}</div>
+    <p class="qr-caption">请使用微信「扫一扫」扫描二维码</p>
+    <p class="hint center">在手机上打开本页时，可长按二维码保存，再在微信中识别。</p>
+    {% else %}
+    <p class="muted">支付二维码暂不可用，请稍后刷新页面或重新发起预约。</p>
+    {% endif %}
+
+    <div class="pay-amount">
+      <span class="pay-amount-label">应付金额</span>
+      <span class="pay-amount-value">{{ booking.amount_fen | fen }}</span>
+    </div>
+
+    <p class="countdown-line">支付剩余时间
+      <span class="countdown" id="countdown">{{ '%02d:%02d' % (remaining_seconds // 60, remaining_seconds % 60) }}</span>
+    </p>
+
+    <div class="actions">
+      <button type="button" class="btn btn-primary" id="refresh-btn">我已完成支付，刷新状态</button>
+      {% if qr_svg %}<button type="button" class="btn btn-secondary" id="save-qr-btn">保存二维码</button>{% endif %}
+    </div>
+  </section>
+  {% endif %}
+
+  <section class="card state" id="state-paid" {% if state != 'paid' %}hidden{% endif %}>
+    <p class="state-mark ok" aria-hidden="true">✓</p>
+    <h2>预约已确认</h2>
+    <p>确认邮件已发送至 <strong>{{ booking.customer_email }}</strong>，日历邀请也已同步。</p>
+    {% if booking.paid_at %}
+    <p class="hint">支付时间：{{ booking.paid_at | localtime(tz_name) }}（{{ timezone_label(tz_name) }}）</p>
+    {% endif %}
+  </section>
+
+  <section class="card state" id="state-dead" {% if state != 'dead' %}hidden{% endif %}>
+    <p class="state-mark dead" aria-hidden="true">×</p>
+    <h2>预约已失效</h2>
+    <p>{{ dead_reason }}该时段已重新开放，你可以重新选择时间。</p>
+    <div class="actions">
+      <a class="btn btn-primary" href="/">重新预约</a>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2 class="card-title">订单信息</h2>
+    <dl class="facts">
+      <div><dt>预约编号</dt><dd class="mono">{{ booking.reference }}</dd></div>
+      <div><dt>咨询类型</dt><dd>{{ event_title }}</dd></div>
+      <div><dt>时间</dt><dd>{{ booking.slot_start | localtime(tz_name) }}（{{ timezone_label(tz_name) }}）</dd></div>
+      <div><dt>金额</dt><dd>{{ booking.amount_fen | fen }}</dd></div>
+    </dl>
+  </section>
+
+  <div class="actions">
+    <a class="btn btn-secondary" href="/">返回预约页</a>
+  </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+{% raw %}
+<script>
+(function () {
+  var root = document.getElementById('book-status');
+  if (!root) return;
+
+  var reference = root.getAttribute('data-reference');
+  var expiresAt = root.getAttribute('data-expires-at');
+  var current = root.getAttribute('data-state');
+
+  var titleEl = document.getElementById('state-title');
+  var ledeEl = document.getElementById('state-lede');
+  var liveEl = document.getElementById('live-region');
+  var panels = {
+    pending: document.getElementById('state-pending'),
+    paid: document.getElementById('state-paid'),
+    dead: document.getElementById('state-dead')
+  };
+
+  var COPY = {
+    paid: { title: '预约已确认', lede: '我们已收到你的付款，确认邮件与日历邀请已发送。' },
+    dead: { title: '预约已失效', lede: '本次预约的支付时限已过，时段已释放。你可以重新选择时间。' }
+  };
+
+  var pollTimer = null;
+  var tickTimer = null;
+
+  function show(state) {
+    Object.keys(panels).forEach(function (key) {
+      var panel = panels[key];
+      if (panel) panel.hidden = (key !== state);
+    });
+  }
+
+  function applyState(state, announce) {
+    if (!state || state === current) return;
+    current = state;
+    show(state);
+    var copy = COPY[state];
+    if (copy && titleEl && ledeEl) {
+      titleEl.textContent = copy.title;
+      ledeEl.textContent = copy.lede;
+    }
+    if (state !== 'pending') {
+      stopPolling();
+      stopTicking();
+      var qrSlot = document.getElementById('qr-slot');
+      if (qrSlot) qrSlot.innerHTML = '';
+      if (announce && liveEl) liveEl.textContent = copy ? copy.title : '';
+    }
+  }
+
+  function poll() {
+    return fetch('/api/bookings/' + encodeURIComponent(reference), {
+      headers: { Accept: 'application/json' },
+      cache: 'no-store'
+    }).then(function (res) {
+      if (!res.ok) return null;
+      return res.json();
+    }).then(function (data) {
+      if (!data || !data.status) return;
+      if (data.status === 'paid') { applyState('paid', true); return; }
+      if (data.status === 'expired' || data.status === 'cancelled') { applyState('dead', true); return; }
+      // Lazy expiry: the API reports the stored status, so mirror the server rule
+      // and treat a pending hold past its deadline as dead.
+      if (data.status === 'pending_payment' && data.expires_at &&
+          new Date(data.expires_at).getTime() <= Date.now()) {
+        applyState('dead', true);
+      }
+    }).catch(function () { /* transient — keep polling */ });
+  }
+
+  function startPolling() { if (!pollTimer) pollTimer = setInterval(poll, 3000); }
+  function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+  function tick() {
+    var el = document.getElementById('countdown');
+    if (!el || !expiresAt) return;
+    var remaining = new Date(expiresAt).getTime() - Date.now();
+    if (remaining <= 0) {
+      el.textContent = '00:00';
+      applyState('dead', true);
+      return;
+    }
+    var total = Math.floor(remaining / 1000);
+    var mm = String(Math.floor(total / 60)).padStart(2, '0');
+    var ss = String(total % 60).padStart(2, '0');
+    el.textContent = mm + ':' + ss;
+  }
+  function startTicking() { if (!tickTimer) tickTimer = setInterval(tick, 1000); }
+  function stopTicking() { if (tickTimer) { clearInterval(tickTimer); tickTimer = null; } }
+
+  var refreshBtn = document.getElementById('refresh-btn');
+  if (refreshBtn) refreshBtn.addEventListener('click', function () { poll(); });
+
+  var saveBtn = document.getElementById('save-qr-btn');
+  if (saveBtn) saveBtn.addEventListener('click', function () {
+    var svg = document.querySelector('#qr-slot svg');
+    if (!svg) return;
+    var markup = new XMLSerializer().serializeToString(svg);
+    var blob = new Blob(['<?xml version="1.0" encoding="UTF-8"?>\n' + markup],
+                        { type: 'image/svg+xml' });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = 'zhituoyuan-' + reference + '.svg';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  });
+
+  if (current === 'pending') {
+    tick();
+    startTicking();
+    startPolling();
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) { stopPolling(); stopTicking(); }
+      else { poll(); startPolling(); startTicking(); }
+    });
+  }
+})();
+</script>
+{% endraw %}
+{% endblock %}

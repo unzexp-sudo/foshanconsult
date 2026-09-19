@@ -13,17 +13,19 @@ import secrets
 from datetime import UTC, datetime, time
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
-    Enum as SAEnum,
     ForeignKey,
     Index,
     Integer,
     String,
     Text,
     Time,
-    JSON,
     text,
+)
+from sqlalchemy import (
+    Enum as SAEnum,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -38,7 +40,14 @@ def new_reference() -> str:
     return f"BK{body}"
 
 
-class BookingStatus(str, enum.Enum):
+class BookingStatus(enum.StrEnum):
+    """Booking lifecycle state.
+
+    ``StrEnum`` rather than ``(str, Enum)``: the members *are* the strings the DB
+    stores, so ``f"{status}"`` and ``str(status)`` both yield ``"paid"`` rather
+    than ``"BookingStatus.PAID"``.  The partial index predicate in
+    ``__table_args__`` compares against those literal values.
+    """
     PENDING_PAYMENT = "pending_payment"
     PAID = "paid"
     EXPIRED = "expired"
@@ -79,7 +88,7 @@ class EventType(Base):
     timezone: Mapped[str] = mapped_column(String(64), default="Asia/Shanghai")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    availability_rules: Mapped[list["AvailabilityRule"]] = relationship(
+    availability_rules: Mapped[list[AvailabilityRule]] = relationship(
         back_populates="event_type",
         cascade="all, delete-orphan",
         lazy="selectin",
@@ -137,6 +146,14 @@ class Booking(Base):
     code_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     provider_transaction_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Additive to contract §6 (integrator, 2026-09-19): the "calendar confirmed +
+    # confirmation email sent" marker.  Without it, `calendar_event_id IS NULL`
+    # had to mean BOTH "already finalised" and "never held", so a booking whose
+    # hold was released before the payment landed got no calendar event and no
+    # email at all — a silent failure.  Keep the two ideas apart.
+    finalized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(

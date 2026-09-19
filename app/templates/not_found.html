@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}未找到预约 · 知托源{% endblock %}
+
+{% block content %}
+<section class="card empty">
+  <p class="state-mark dead" aria-hidden="true">×</p>
+  <h1>未找到该预约</h1>
+  <p class="muted">预约编号 <span class="mono">{{ reference }}</span> 不存在，或链接已失效。</p>
+  <p class="muted">请检查编号是否正确，或重新发起预约。</p>
+  <div class="actions">
+    <a class="btn btn-primary" href="/">返回预约页</a>
+  </div>
+</section>
+{% endblock %}

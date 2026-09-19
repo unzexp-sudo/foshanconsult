@@ -23,6 +23,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
+# 0. A writable temp root.
+#
+# The default temp dir is not always writable in a sandboxed run, which makes
+# pytest's `tmp_path` fail at fixture setup with a PermissionError that looks
+# like a test bug.  Point tempfile at a repo-local directory before anything
+# asks for a temp path.
+# ---------------------------------------------------------------------------
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_TEMP_ROOT = _REPO_ROOT / ".pytest_tmp"
+_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+os.environ["TMPDIR"] = str(_TEMP_ROOT)
+tempfile.tempdir = str(_TEMP_ROOT)
+
+# ---------------------------------------------------------------------------
 # 1. Environment — MUST happen before the first `import app.*`
 # ---------------------------------------------------------------------------
 _TMP_ROOT = Path(tempfile.mkdtemp(prefix="booking-tests-"))

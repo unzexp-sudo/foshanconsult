@@ -1,0 +1,297 @@
+{% extends "base.html" %}
+{% block title %}预约咨询 · 知托源{% endblock %}
+
+{% block content %}
+<header class="page-head">
+  <p class="eyebrow">1-1 付费咨询</p>
+  <h1>预约咨询</h1>
+  {% if primary %}
+  <p class="lede">{{ primary.description }}</p>
+  {% else %}
+  <p class="lede">选择合适的时间，完成支付后预约立即确认。</p>
+  {% endif %}
+</header>
+
+{% if not event_types %}
+<section class="card">
+  <h2>暂无可预约的咨询类型</h2>
+  <p class="muted">预约通道暂时关闭，请稍后再试，或通过官网与我们联系。</p>
+</section>
+{% else %}
+
+<form id="booking-form" novalidate>
+
+  <section class="card step">
+    <div class="step-head"><span class="step-num" aria-hidden="true">1</span><h2>选择咨询类型</h2></div>
+    <div class="field">
+      <label for="event-type">咨询类型</label>
+      <select id="event-type" name="event_type_id">
+        {% for et in event_types %}
+        <option value="{{ et.id }}"
+                data-tz="{{ et.timezone }}"
+                data-max-days="{{ et.max_days_ahead }}"
+                data-price-label="{{ et.price_fen | fen }}"
+                data-duration-label="{{ et.duration_minutes }} 分钟"
+                {% if loop.first %}selected{% endif %}>
+          {{ et.title }} · {{ et.price_fen | fen }} · {{ et.duration_minutes }} 分钟
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+    <p class="summary" id="event-summary" aria-live="polite"></p>
+  </section>
+
+  <section class="card step">
+    <div class="step-head"><span class="step-num" aria-hidden="true">2</span><h2>选择日期</h2></div>
+    <div class="field">
+      <label for="date">日期</label>
+      <input type="date" id="date" name="date">
+    </div>
+    <p class="hint" id="date-hint"></p>
+  </section>
+
+  <section class="card step">
+    <div class="step-head"><span class="step-num" aria-hidden="true">3</span><h2>选择时间</h2></div>
+    <div class="slots" id="slots" role="group" aria-label="可预约时间段">
+      <p class="muted">正在加载可预约时间…</p>
+    </div>
+    <p class="hint" id="slots-hint" role="status"></p>
+    <p class="hint" id="tz-hint"></p>
+  </section>
+
+  <section class="card step">
+    <div class="step-head"><span class="step-num" aria-hidden="true">4</span><h2>填写联系信息</h2></div>
+
+    <div class="field">
+      <label for="name">姓名 <span class="req">必填</span></label>
+      <input id="name" name="customer_name" type="text" autocomplete="name" maxlength="200" required>
+    </div>
+
+    <div class="field">
+      <label for="email">邮箱 <span class="req">必填</span></label>
+      <input id="email" name="customer_email" type="email" autocomplete="email" maxlength="320" required>
+      <p class="hint">确认邮件与日历邀请将发送至该邮箱。</p>
+    </div>
+
+    <div class="field">
+      <label for="phone">手机号 <span class="opt">选填</span></label>
+      <input id="phone" name="customer_phone" type="tel" autocomplete="tel" maxlength="64">
+    </div>
+
+    <div class="field">
+      <label for="note">备注 <span class="opt">选填</span></label>
+      <textarea id="note" name="customer_note" rows="3" maxlength="2000"
+                placeholder="希望重点讨论的问题"></textarea>
+    </div>
+  </section>
+
+  <div class="actions">
+    <button type="submit" class="btn btn-primary" id="submit-btn">确认并前往支付</button>
+    <p class="hint center">下一步会生成微信支付二维码，请在 {{ hold_minutes }} 分钟内完成支付。</p>
+    <p class="form-error" id="form-error" role="alert" hidden></p>
+  </div>
+
+</form>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% raw %}
+<script>
+(function () {
+  var form = document.getElementById('booking-form');
+  if (!form) return;
+
+  var eventSelect = document.getElementById('event-type');
+  var dateInput = document.getElementById('date');
+  var slotsBox = document.getElementById('slots');
+  var slotsHint = document.getElementById('slots-hint');
+  var tzHint = document.getElementById('tz-hint');
+  var summary = document.getElementById('event-summary');
+  var errorBox = document.getElementById('form-error');
+  var submitBtn = document.getElementById('submit-btn');
+
+  var selectedStart = null;
+
+  function option() { return eventSelect.options[eventSelect.selectedIndex]; }
+  function tz() { return option().getAttribute('data-tz') || 'Asia/Shanghai'; }
+  function maxDays() { return parseInt(option().getAttribute('data-max-days'), 10) || 60; }
+
+  function todayInTz(zone) {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit'
+    }).format(new Date());
+  }
+  function addDays(iso, days) {
+    var parts = iso.split('-').map(Number);
+    var dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2] + days));
+    return dt.toISOString().slice(0, 10);
+  }
+  function weekday(iso) {
+    var parts = iso.split('-').map(Number);
+    return new Date(Date.UTC(parts[0], parts[1] - 1, parts[2])).getUTCDay();
+  }
+  function nextBusinessDay(iso) {
+    for (var i = 1; i <= 7; i++) {
+      var candidate = addDays(iso, i);
+      var wd = weekday(candidate);
+      if (wd !== 0 && wd !== 6) return candidate;
+    }
+    return addDays(iso, 1);
+  }
+  function fmtTime(iso) {
+    return new Intl.DateTimeFormat('zh-CN', {
+      timeZone: tz(), hour: '2-digit', minute: '2-digit', hour12: false
+    }).format(new Date(iso));
+  }
+  function fmtDateTime(iso) {
+    return new Intl.DateTimeFormat('zh-CN', {
+      timeZone: tz(), year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false
+    }).format(new Date(iso));
+  }
+
+  function showError(message) {
+    if (!errorBox) return;
+    errorBox.textContent = message;
+    errorBox.hidden = false;
+  }
+  function hideError() {
+    if (!errorBox) return;
+    errorBox.hidden = true;
+    errorBox.textContent = '';
+  }
+
+  function syncSummary() {
+    var opt = option();
+    if (summary) {
+      summary.textContent = opt.getAttribute('data-price-label') + ' · ' +
+        opt.getAttribute('data-duration-label');
+    }
+    if (tzHint) tzHint.textContent = '以上时间均为 ' + tz() + ' 时区。';
+  }
+
+  function syncDateBounds() {
+    var today = todayInTz(tz());
+    dateInput.min = today;
+    dateInput.max = addDays(today, maxDays());
+    if (!dateInput.value || dateInput.value < today || dateInput.value > dateInput.max) {
+      dateInput.value = nextBusinessDay(today);
+    }
+    var hint = document.getElementById('date-hint');
+    if (hint) hint.textContent = '可预约 ' + dateInput.min + ' 至 ' + dateInput.max + '。';
+  }
+
+  function renderSlots(slots) {
+    slotsBox.innerHTML = '';
+    if (!slots || !slots.length) {
+      var empty = document.createElement('p');
+      empty.className = 'muted';
+      empty.textContent = '当天暂无可预约时间，请选择其他日期。';
+      slotsBox.appendChild(empty);
+      return;
+    }
+    slots.forEach(function (slot) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'slot';
+      btn.textContent = fmtTime(slot.start);
+      btn.setAttribute('aria-pressed', 'false');
+      btn.addEventListener('click', function () { selectSlot(btn, slot.start); });
+      slotsBox.appendChild(btn);
+    });
+  }
+
+  function selectSlot(btn, start) {
+    Array.prototype.forEach.call(slotsBox.querySelectorAll('.slot'), function (other) {
+      other.classList.remove('is-selected');
+      other.setAttribute('aria-pressed', 'false');
+    });
+    btn.classList.add('is-selected');
+    btn.setAttribute('aria-pressed', 'true');
+    selectedStart = start;
+    if (slotsHint) slotsHint.textContent = '已选择 ' + fmtDateTime(start) + '（' + tz() + '）';
+    hideError();
+  }
+
+  function loadSlots() {
+    selectedStart = null;
+    if (slotsHint) slotsHint.textContent = '';
+    slotsBox.innerHTML = '<p class="muted">正在加载可预约时间…</p>';
+    var et = eventSelect.value;
+    var date = dateInput.value;
+    if (!et || !date) return;
+    fetch('/api/slots?event_type_id=' + encodeURIComponent(et) + '&date=' + encodeURIComponent(date), {
+      headers: { Accept: 'application/json' }
+    }).then(function (res) {
+      if (!res.ok) throw new Error('slots request failed');
+      return res.json();
+    }).then(function (data) {
+      renderSlots(data.slots);
+    }).catch(function () {
+      slotsBox.innerHTML = '<p class="muted">加载失败，请稍后重试。</p>';
+    });
+  }
+
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    hideError();
+    if (!selectedStart) { showError('请先选择一个可预约的时间。'); return; }
+    if (!form.reportValidity()) return;
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = '正在创建订单…';
+
+    var payload = {
+      event_type_id: eventSelect.value,
+      slot_start: selectedStart,
+      customer_name: document.getElementById('name').value.trim(),
+      customer_email: document.getElementById('email').value.trim(),
+      customer_phone: document.getElementById('phone').value.trim() || null,
+      customer_note: document.getElementById('note').value.trim() || null
+    };
+
+    fetch('/api/bookings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(function (res) {
+      if (res.status === 201) {
+        return res.json().then(function (data) {
+          // The payment token stays server-side; the status page renders the QR.
+          window.location.assign('/book/' + encodeURIComponent(data.reference));
+        });
+      }
+      if (res.status === 409) {
+        showError('该时段刚刚被预订，请重新选择时间。');
+        loadSlots();
+        return;
+      }
+      if (res.status === 422) {
+        showError('该时段已不可预约，请重新选择时间。');
+        loadSlots();
+        return;
+      }
+      showError('创建订单失败，请稍后重试。');
+    }).catch(function () {
+      showError('网络异常，请检查网络后重试。');
+    }).then(function () {
+      submitBtn.disabled = false;
+      submitBtn.textContent = '确认并前往支付';
+    });
+  });
+
+  eventSelect.addEventListener('change', function () {
+    syncSummary();
+    syncDateBounds();
+    loadSlots();
+  });
+  dateInput.addEventListener('change', loadSlots);
+
+  syncSummary();
+  syncDateBounds();
+  loadSlots();
+})();
+</script>
+{% endraw %}
+{% endblock %}

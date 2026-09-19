@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TODO(brand): PLACEHOLDER WORDMARK — REPLACE ME.
+
+  This is a hand-drawn stand-in, not the official logo. Before launch, replace
+  this file with the real horizontal logo from the marketing site:
+
+      /brand/logo-horizontal.svg   on   https://www.zhituoyuan.com
+
+  Keep the same intrinsic size (or update width/height on <img class="brand-mark">
+  in app/templates/base.html) so the header height does not shift. The payment
+  page must not look like a different product from www.zhituoyuan.com.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 28" width="96" height="28">
+  <style>
+    .ink { fill: #1b1b19; }
+    .mark-bg { fill: #2f6b52; }
+    .mark-fg { stroke: #ffffff; }
+    @media (prefers-color-scheme: dark) {
+      .ink { fill: #ececea; }
+      .mark-bg { fill: #6fbf97; }
+      .mark-fg { stroke: #0e1512; }
+    }
+  </style>
+
+  <!-- simple monogram: a growth chevron in the accent square -->
+  <rect class="mark-bg" x="0" y="4" width="20" height="20" rx="5"/>
+  <path class="mark-fg" d="M5.5 17.5 L9.5 11.5 L12.5 14.8 L15 10.8"
+        fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <text class="ink" x="28" y="19.5" font-size="14" font-weight="600"
+        font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif">知托源</text>
+</svg>

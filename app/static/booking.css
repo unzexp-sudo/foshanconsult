@@ -1,0 +1,559 @@
+/* zhituoyuan booking — plain CSS, no build step, no external request.
+ *
+ * Light and dark are both first-class: every colour is a variable and the dark
+ * block only redefines variables.  Nothing here fetches a font or an image.
+ *
+ * Layout is mobile-first — most customers open this on a phone — and must not
+ * break at 360px.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* neutral, slightly warm — a consulting brand, not a SaaS dashboard */
+  --bg: #f6f6f3;
+  --surface: #ffffff;
+  --surface-2: #f0f0ec;
+  --text: #1b1b19;
+  --muted: #6a6a64;
+  --border: #e4e4de;
+  --border-strong: #cdcdc4;
+
+  /* one accent */
+  --accent: #2f6b52;
+  --accent-strong: #24543f;
+  --accent-ink: #ffffff;
+  --accent-soft: #e9f1ec;
+
+  --danger: #9d3b32;
+  --danger-soft: #f8ecea;
+  --focus: #2f6b52;
+  --focus-ring: rgba(47, 107, 82, 0.25);
+
+  --shadow: 0 1px 2px rgba(24, 24, 20, 0.04), 0 10px 28px -20px rgba(24, 24, 20, 0.28);
+
+  --radius: 14px;
+  --radius-sm: 10px;
+  --maxw: 620px;
+
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC",
+    sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131417;
+    --surface: #1c1e22;
+    --surface-2: #24272c;
+    --text: #ececea;
+    --muted: #a4a8ad;
+    --border: #2e3238;
+    --border-strong: #434952;
+
+    --accent: #6fbf97;
+    --accent-strong: #8ad0ac;
+    --accent-ink: #0e1512;
+    --accent-soft: #1b2a23;
+
+    --danger: #e39186;
+    --danger-soft: #2c1d1b;
+    --focus: #8ad0ac;
+    --focus-ring: rgba(111, 191, 151, 0.32);
+
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 14px 34px -22px rgba(0, 0, 0, 0.8);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+/* ---------------------------------------------------------------- shell --- */
+
+.shell {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 20px 16px 56px;
+}
+
+.brand {
+  padding: 8px 0 24px;
+}
+.brand-link {
+  display: inline-block;
+}
+.brand-mark {
+  display: block;
+  width: 96px;
+  height: 28px;
+}
+
+.main {
+  display: block;
+}
+
+.site-foot {
+  margin-top: 40px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+.site-foot p {
+  margin: 0 0 4px;
+}
+.foot-brand {
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+/* ------------------------------------------------------------ typography --- */
+
+.page-head {
+  margin: 0 0 24px;
+}
+.eyebrow {
+  margin: 0 0 6px;
+  font-size: 0.8125rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+h1 {
+  margin: 0 0 10px;
+  font-size: clamp(1.5rem, 5.5vw, 1.875rem);
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  font-weight: 650;
+}
+h2 {
+  margin: 0 0 12px;
+  font-size: 1.0625rem;
+  line-height: 1.4;
+  font-weight: 600;
+}
+.lede {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+.card-title {
+  font-size: 0.9375rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+.muted {
+  color: var(--muted);
+}
+.small {
+  font-size: 0.8125rem;
+}
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.04em;
+}
+.center {
+  text-align: center;
+}
+.hint {
+  margin: 8px 0 0;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  line-height: 1.55;
+}
+.req,
+.opt {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted);
+  margin-left: 4px;
+}
+.req {
+  color: var(--danger);
+}
+
+/* ----------------------------------------------------------------- cards --- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 18px 16px;
+  margin-bottom: 16px;
+}
+.card > :last-child {
+  margin-bottom: 0;
+}
+
+.step-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.step-head h2 {
+  margin: 0;
+}
+.step-num {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 0.8125rem;
+  font-weight: 650;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---------------------------------------------------------------- fields --- */
+
+.field {
+  margin-bottom: 16px;
+}
+.field:last-child {
+  margin-bottom: 0;
+}
+label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+input,
+select,
+textarea {
+  width: 100%;
+  min-height: 48px;
+  padding: 11px 13px;
+  font-family: inherit;
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  appearance: none;
+}
+textarea {
+  min-height: 88px;
+  resize: vertical;
+}
+select {
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 18px) 21px, calc(100% - 13px) 21px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 40px;
+}
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+  opacity: 0.75;
+}
+
+.summary {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- slots --- */
+
+.slots {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(78px, 1fr));
+  gap: 8px;
+}
+.slots .muted {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.875rem;
+}
+.slot {
+  min-height: 46px;
+  padding: 8px 6px;
+  font-family: inherit;
+  font-size: 0.9375rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.slot:hover {
+  border-color: var(--border-strong);
+}
+.slot.is-selected {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 650;
+}
+
+/* -------------------------------------------------------------- buttons --- */
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 18px;
+}
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 50px;
+  padding: 12px 20px;
+  font-family: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  text-decoration: none;
+}
+.btn:hover {
+  text-decoration: none;
+}
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.btn-primary:hover {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+.btn-secondary {
+  background: var(--surface);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.btn-secondary:hover {
+  border-color: var(--accent);
+}
+.btn[disabled] {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.form-error {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 0.875rem;
+}
+
+/* ------------------------------------------------------- status / QR --- */
+
+.live {
+  margin: 0 0 16px;
+  padding: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--accent-strong);
+}
+.live:empty {
+  display: none;
+}
+
+.state {
+  text-align: center;
+}
+.state h2 {
+  font-size: 1.25rem;
+}
+
+.state-mark {
+  margin: 4px auto 10px;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.state-mark.ok {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.state-mark.dead {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* The QR is always dark-on-white and large — it has to scan off a phone screen
+   in either theme, so the surface under it is deliberately not themed. */
+.qr {
+  width: min(100%, 320px);
+  margin: 0 auto 12px;
+  padding: 14px;
+  background: #ffffff;
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+}
+.qr svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  shape-rendering: crispEdges;
+}
+.qr-caption {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.pay-amount {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  margin: 18px 0 4px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.pay-amount-label {
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+.pay-amount-value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.countdown-line {
+  margin: 6px 0 0;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+.countdown {
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  color: var(--text);
+}
+
+/* ---------------------------------------------------------------- facts --- */
+
+.facts {
+  margin: 0;
+}
+.facts > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+}
+.facts > div:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.facts > div:first-child {
+  padding-top: 0;
+}
+.facts dt {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+.facts dd {
+  margin: 0;
+  text-align: right;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  text-align: center;
+}
+.empty h1 {
+  font-size: 1.375rem;
+}
+
+/* --------------------------------------------------------------- wider --- */
+
+@media (min-width: 520px) {
+  .shell {
+    padding: 28px 24px 64px;
+  }
+  .card {
+    padding: 22px 22px;
+  }
+  .actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .actions .btn {
+    flex: 1 1 auto;
+  }
+  .actions .hint,
+  .actions .form-error {
+    flex: 1 1 100%;
+  }
+  .state .actions {
+    justify-content: center;
+  }
+  .state .actions .btn {
+    flex: 0 1 auto;
+    min-width: 200px;
+  }
+}

@@ -28,8 +28,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from app.config import Settings
 from app.ports.calendar import BusyInterval, CalendarEvent
-from app.ports.payments import ChargeRequest, ChargeResult, PaymentNotification
-from app.ports.payments import PaymentSignatureError
+from app.ports.payments import (
+    ChargeRequest,
+    ChargeResult,
+    PaymentNotification,
+    PaymentSignatureError,
+)
 
 # ---------------------------------------------------------------------------
 # Calendar
@@ -146,12 +150,19 @@ class FakePaymentGateway:
             raise PaymentSignatureError("bad fake signature")
 
         payload = json.loads(body.decode("utf-8"))
+        raw_success = payload.get("success_time")
         notification = PaymentNotification(
             out_trade_no=payload["out_trade_no"],
             transaction_id=payload["transaction_id"],
             amount_fen=payload["amount_fen"],
             trade_state=payload.get("trade_state", "SUCCESS"),
-            success_time=payload.get("success_time"),
+            # The port says datetime | None.  Accept an ISO string or a datetime so
+            # a caller cannot hand a consumer the wrong type.
+            success_time=(
+                raw_success
+                if isinstance(raw_success, datetime)
+                else (datetime.fromisoformat(raw_success) if raw_success else None)
+            ),
         )
         self.orders[notification.out_trade_no] = notification
         return notification
@@ -415,6 +426,6 @@ def _sign_notification(
     from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
     key = load_pem_private_key(private_key_pem.encode("utf-8"), password=None)
-    message = f"{timestamp}\n{nonce}\n{body.decode('utf-8')}\n".encode("utf-8")
+    message = f"{timestamp}\n{nonce}\n{body.decode('utf-8')}\n".encode()
     signature = key.sign(message, padding.PKCS1v15(), hashes.SHA256())
     return base64.b64encode(signature).decode("ascii")

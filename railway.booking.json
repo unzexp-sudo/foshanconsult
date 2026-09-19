@@ -1,0 +1,54 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile.booking",
+    "watchPatterns": [
+      "app/**",
+      "pyproject.toml",
+      "Dockerfile.booking",
+      "railway.booking.json"
+    ]
+  },
+  "deploy": {
+    "healthcheckPath": "/healthz",
+    "healthcheckTimeout": 120,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  },
+  "x-envVars": [
+    "APP_ENV",
+    "DATABASE_URL",
+    "SECRET_KEY",
+    "PUBLIC_BASE_URL",
+    "DEFAULT_TIMEZONE",
+    "CALENDAR_GATEWAY",
+    "CALENDAR_RELAY_URL",
+    "CALENDAR_RELAY_SECRET",
+    "PAYMENT_GATEWAY",
+    "WECHAT_APP_ID",
+    "WECHAT_MCH_ID",
+    "WECHAT_API_V3_KEY",
+    "WECHAT_CERT_SERIAL_NO",
+    "WECHAT_PRIVATE_KEY_PATH",
+    "WECHAT_PUBLIC_KEY_ID",
+    "WECHAT_PUBLIC_KEY_PATH",
+    "HOLD_MINUTES",
+    "SLOT_STEP_MINUTES",
+    "SWEEPER_INTERVAL_SECONDS",
+    "EMAIL_BACKEND",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_USER",
+    "SMTP_PASSWORD",
+    "EMAIL_FROM",
+    "CELERY_BROKER_URL",
+    "CELERY_RESULT_BACKEND"
+  ],
+  "x-envVarsOptional": [
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "GOOGLE_REFRESH_TOKEN",
+    "GOOGLE_CALENDAR_ID"
+  ]
+}

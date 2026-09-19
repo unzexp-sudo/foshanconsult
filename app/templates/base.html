@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f6f6f3" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#131417" media="(prefers-color-scheme: dark)">
+  <meta name="referrer" content="same-origin">
+  <title>{% block title %}知托源 · 预约咨询{% endblock %}</title>
+  <link rel="stylesheet" href="/static/booking.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="brand">
+      {# TODO(brand): /static/wordmark.svg is a hand-drawn PLACEHOLDER. Replace it with
+         the real /brand/logo-horizontal.svg from www.zhituoyuan.com so the payment
+         page matches the marketing site. #}
+      <a class="brand-link" href="/" aria-label="知托源">
+        <img class="brand-mark" src="/static/wordmark.svg" alt="知托源" width="96" height="28">
+      </a>
+    </header>
+
+    <main class="main">
+      {% block content %}{% endblock %}
+    </main>
+
+    <footer class="site-foot">
+      <p class="foot-brand">知托源 · 1-1 付费咨询</p>
+      <p class="muted small">支付由微信支付完成。如遇问题，请通过官网联系我们。</p>
+    </footer>
+  </div>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+#
+# Calendar relay — the only process in the system that talks to Google.
+#
+# It runs on Railway because googleapis.com is unreachable from mainland servers,
+# while the booking app must run on a mainland host to hold an ICP-filed payment
+# domain (BUILD_PLAN §2).  It is a standalone deployable: it imports nothing from
+# app/ (contract §14.4) and deliberately installs only the dependencies it uses,
+# so it does not carry SQLAlchemy, Celery, Redis, segno, Jinja2, cryptography,
+# psycopg, python-multipart or email-validator.
+#
+# Build context is the repository root:
+#   docker build -f Dockerfile.relay -t booking-relay .
+#   docker run --rm -p 8001:8001 --env-file .env.relay booking-relay
+
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /srv
+
+# The relay's dependency set is the subset of pyproject.toml that relay/** imports.
+# The assert makes a rename in pyproject.toml fail the build loudly instead of
+# silently shipping an image with a missing import.
+COPY pyproject.toml ./
+RUN python -c "\
+import subprocess, sys, tomllib; \
+names = {'fastapi', 'uvicorn', 'pydantic', 'pydantic-settings', 'google-api-python-client', 'google-auth'}; \
+deps = tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']; \
+chosen = [d for d in deps if d.replace('[', '>').split('>')[0].split('=')[0].strip() in names]; \
+assert len(chosen) == len(names), f'relay deps not found in pyproject.toml: {sorted(names)}'; \
+subprocess.check_call([sys.executable, '-m', 'pip', 'install', *chosen])"
+
+# Only the relay package.  No app/ — the relay must not depend on the booking app.
+COPY relay ./relay
+
+RUN useradd --create-home --uid 10002 relayuser \
+    && chown -R relayuser:relayuser /srv
+USER relayuser
+
+EXPOSE 8000
+
+# Railway injects PORT; 8000 is the local default.  Shell form so ${PORT} expands.
+CMD ["sh", "-c", "uvicorn relay.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

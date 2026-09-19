@@ -556,3 +556,99 @@ function body where a sibling might still be unwritten.
 - **`pythonpath = ["."]`** added to the pytest config so `import app` / `import tests`
   resolve without an editable install.
 - **`tests/__init__.py`** added so `from tests.fakes import ...` resolves.
+
+### Integrator addenda, second pass (2026-09-19, after the module build)
+
+Written after the end-to-end pass found two real defects. Each of these is a
+deliberate change to a frozen shape; the reasoning matters more than the diff.
+
+- **`Booking.finalized_at`** added to §6. The first cut overloaded
+  `calendar_event_id IS NULL` to mean both "calendar confirmed and email sent" and
+  "never held". Those are different facts, and merging them meant a booking whose
+  hold had been released before the payment landed got **no calendar event and no
+  email at all** — silently. `finalized_at` is the workflow marker;
+  `calendar_event_id` stays a calendar fact and is no longer cleared on finalise.
+- **`app/services/booking.py` gains `PaymentConflict` and `honour_late_payment()`.**
+  §11 never said what to do when a verified payment arrives for a booking whose hold
+  already expired or was cancelled, and the handler's answer was to ack SUCCESS
+  while `mark_paid` did nothing — money taken, booking unchanged, WeChat never
+  retrying, audit row claiming "paid". The rule now: a verified payment is never
+  dropped. Still pending → normal transition; expired/cancelled but the slot is
+  still free → honour it (they paid, and v1 has no refunds, so the only
+  non-harmful outcome is the call); expired/cancelled and the slot was resold →
+  `PaymentConflict`, a FAIL ack, and an `outcome="paid_conflict"` audit row for
+  whoever has to refund.
+- **`app/routers/payments.py` refuses to ack SUCCESS unless the booking is
+  `paid`.** Belt and braces on the same invariant: if the handler and the service
+  ever drift apart again, WeChat must not be told a lie.
+- **`owned_intervals()` gained `event_type_id` and `now`.** It used to ignore *any*
+  calendar interval we owned, which meant a live hold of event type X did not block
+  event type Y at the same time — a latent double-booking hole the moment a second
+  event type exists. It now ignores an interval only when the owning booking is for
+  the *same* event type (the DB adjudicates those via the partial index and lazy
+  expiry) or is already dead. A live hold of a different event type keeps blocking,
+  because two 1-1 calls cannot overlap.
+- **`app/tasks.py::_finalize_paid_booking` creates the calendar event when there is
+  no hold to confirm.** Follows from the late-payment policy: the sweep may have
+  released the hold already, and the owner must still get an invitation.
+- **`tests/test_integration.py`** added — integrator-owned cross-module guards. The
+  three defects above all lived *between* modules, which is exactly where no single
+  module agent was looking.
+- **`nextjs-integration/`** added — the BUILD_PLAN §3 files for the
+  www.zhituoyuan.com repo, kept here as a patch because that repo is not in this
+  build. See its README for the two edits still needed in the site repo.
+- **Divergence from BUILD_PLAN §5, resolved in favour of the contract:**
+  BUILD_PLAN says `POST /api/bookings` returns an inline `qr_svg`; §11 and
+  `app/schemas.py` say `code_url`. The contract wins. The payment token is kept out
+  of client JS a different way — the slot picker redirects to
+  `{PAY_BASE}/book/{reference}` and the QR is rendered server-side into that HTML
+  (verified: the status page contains an inline `<svg>` and never the `code_url`
+  string).
+
+### Integrator addenda, second pass (2026-09-19, after the module build)
+
+Written after the end-to-end pass found two real defects. Each of these is a
+deliberate change to a frozen shape; the reasoning matters more than the diff.
+
+- **`Booking.finalized_at`** added to §6. The first cut overloaded
+  `calendar_event_id IS NULL` to mean both "calendar confirmed and email sent" and
+  "never held". Those are different facts, and merging them meant a booking whose
+  hold had been released before the payment landed got **no calendar event and no
+  email at all** — silently. `finalized_at` is the workflow marker;
+  `calendar_event_id` stays a calendar fact and is no longer cleared on finalise.
+- **`app/services/booking.py` gains `PaymentConflict` and `honour_late_payment()`.**
+  §11 never said what to do when a verified payment arrives for a booking whose hold
+  already expired or was cancelled, and the handler's answer was to ack SUCCESS
+  while `mark_paid` did nothing — money taken, booking unchanged, WeChat never
+  retrying, audit row claiming "paid". The rule now: a verified payment is never
+  dropped. Still pending → normal transition; expired/cancelled but the slot is
+  still free → honour it (they paid, and v1 has no refunds, so the only
+  non-harmful outcome is the call); expired/cancelled and the slot was resold →
+  `PaymentConflict`, a FAIL ack, and an `outcome="paid_conflict"` audit row for
+  whoever has to refund.
+- **`app/routers/payments.py` refuses to ack SUCCESS unless the booking is
+  `paid`.** Belt and braces on the same invariant: if the handler and the service
+  ever drift apart again, WeChat must not be told a lie.
+- **`owned_intervals()` gained `event_type_id` and `now`.** It used to ignore *any*
+  calendar interval we owned, which meant a live hold of event type X did not block
+  event type Y at the same time — a latent double-booking hole the moment a second
+  event type exists. It now ignores an interval only when the owning booking is for
+  the *same* event type (the DB adjudicates those via the partial index and lazy
+  expiry) or is already dead. A live hold of a different event type keeps blocking,
+  because two 1-1 calls cannot overlap.
+- **`app/tasks.py::_finalize_paid_booking` creates the calendar event when there is
+  no hold to confirm.** Follows from the late-payment policy: the sweep may have
+  released the hold already, and the owner must still get an invitation.
+- **`tests/test_integration.py`** added — integrator-owned cross-module guards. The
+  three defects above all lived *between* modules, which is exactly where no single
+  module agent was looking.
+- **`nextjs-integration/`** added — the BUILD_PLAN §3 files for the
+  www.zhituoyuan.com repo, kept here as a patch because that repo is not in this
+  build. See its README for the two edits still needed in the site repo.
+- **Divergence from BUILD_PLAN §5, resolved in favour of the contract:**
+  BUILD_PLAN says `POST /api/bookings` returns an inline `qr_svg`; §11 and
+  `app/schemas.py` say `code_url`. The contract wins. The payment token is kept out
+  of client JS a different way — the slot picker redirects to
+  `{PAY_BASE}/book/{reference}` and the QR is rendered server-side into that HTML
+  (verified: the status page contains an inline `<svg>` and never the `code_url`
+  string).
