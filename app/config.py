@@ -50,6 +50,17 @@ class Settings(BaseSettings):
     slot_step_minutes: int = 15
     sweeper_interval_seconds: int = 60
 
+    # -- rate limiting ------------------------------------------------------
+    # BUILD_PLAN §10.  Counters are per process, so the effective budget is these
+    # values times the number of uvicorn workers / replicas (see app/rate_limit.py).
+    # A human books at most a handful of times an hour, so these are generous.
+    rate_limit_bookings_per_hour: int = 20
+    rate_limit_slots_per_hour: int = 300
+    # Number of trusted reverse proxies in front of the app.  0 means "use the peer
+    # address".  Set to 1 behind a single nginx / platform proxy, otherwise the
+    # limiter cannot see past the proxy and every caller shares one budget.
+    trusted_proxy_depth: int = 0
+
     # -- email --------------------------------------------------------------
     email_backend: str = "console"  # console | smtp
     smtp_host: str = ""

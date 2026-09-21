@@ -605,50 +605,45 @@ deliberate change to a frozen shape; the reasoning matters more than the diff.
   (verified: the status page contains an inline `<svg>` and never the `code_url`
   string).
 
-### Integrator addenda, second pass (2026-09-19, after the module build)
+### Integrator addenda, third pass (2026-09-19, closing the §10 gaps)
 
-Written after the end-to-end pass found two real defects. Each of these is a
-deliberate change to a frozen shape; the reasoning matters more than the diff.
-
-- **`Booking.finalized_at`** added to §6. The first cut overloaded
-  `calendar_event_id IS NULL` to mean both "calendar confirmed and email sent" and
-  "never held". Those are different facts, and merging them meant a booking whose
-  hold had been released before the payment landed got **no calendar event and no
-  email at all** — silently. `finalized_at` is the workflow marker;
-  `calendar_event_id` stays a calendar fact and is no longer cleared on finalise.
-- **`app/services/booking.py` gains `PaymentConflict` and `honour_late_payment()`.**
-  §11 never said what to do when a verified payment arrives for a booking whose hold
-  already expired or was cancelled, and the handler's answer was to ack SUCCESS
-  while `mark_paid` did nothing — money taken, booking unchanged, WeChat never
-  retrying, audit row claiming "paid". The rule now: a verified payment is never
-  dropped. Still pending → normal transition; expired/cancelled but the slot is
-  still free → honour it (they paid, and v1 has no refunds, so the only
-  non-harmful outcome is the call); expired/cancelled and the slot was resold →
-  `PaymentConflict`, a FAIL ack, and an `outcome="paid_conflict"` audit row for
-  whoever has to refund.
-- **`app/routers/payments.py` refuses to ack SUCCESS unless the booking is
-  `paid`.** Belt and braces on the same invariant: if the handler and the service
-  ever drift apart again, WeChat must not be told a lie.
-- **`owned_intervals()` gained `event_type_id` and `now`.** It used to ignore *any*
-  calendar interval we owned, which meant a live hold of event type X did not block
-  event type Y at the same time — a latent double-booking hole the moment a second
-  event type exists. It now ignores an interval only when the owning booking is for
-  the *same* event type (the DB adjudicates those via the partial index and lazy
-  expiry) or is already dead. A live hold of a different event type keeps blocking,
-  because two 1-1 calls cannot overlap.
-- **`app/tasks.py::_finalize_paid_booking` creates the calendar event when there is
-  no hold to confirm.** Follows from the late-payment policy: the sweep may have
-  released the hold already, and the owner must still get an invitation.
-- **`tests/test_integration.py`** added — integrator-owned cross-module guards. The
-  three defects above all lived *between* modules, which is exactly where no single
-  module agent was looking.
-- **`nextjs-integration/`** added — the BUILD_PLAN §3 files for the
-  www.zhituoyuan.com repo, kept here as a patch because that repo is not in this
-  build. See its README for the two edits still needed in the site repo.
-- **Divergence from BUILD_PLAN §5, resolved in favour of the contract:**
-  BUILD_PLAN says `POST /api/bookings` returns an inline `qr_svg`; §11 and
-  `app/schemas.py` say `code_url`. The contract wins. The payment token is kept out
-  of client JS a different way — the slot picker redirects to
-  `{PAY_BASE}/book/{reference}` and the QR is rendered server-side into that HTML
-  (verified: the status page contains an inline `<svg>` and never the `code_url`
-  string).
+- **`app/rate_limit.py` added** — BUILD_PLAN §10's *"rate-limit `POST /api/bookings`"*,
+  which the module build left unbuilt. `FixedWindowLimiter` is a plain in-process
+  fixed-window counter; the dependency is attached in `app/routers/booking.py` to
+  `POST /api/bookings` and to `GET /api/slots`. Three settings added to §5:
+  `rate_limit_bookings_per_hour` (20), `rate_limit_slots_per_hour` (300), and
+  `trusted_proxy_depth` (0).
+  Three decisions worth recording:
+  - **The counter counts attempts, not successes.** A limiter that only charges for
+    accepted requests is free to bypass — a caller just spams requests that were going
+    to fail. Pinned by `test_the_budget_is_spent_by_failed_attempts_too`.
+  - **Client identity is the peer address, or the Nth-from-the-right entry of
+    `X-Forwarded-For` when `trusted_proxy_depth > 0`.** Counting from the *right*
+    matters: the leftmost entry is caller-supplied, so a naive implementation lets an
+    attacker mint a fresh identity per request by rotating the header, and the limit
+    stops limiting anything.
+  - **`POST /api/payments/wechat/notify` is deliberately never throttled.** WeChat's
+    retry schedule is part of the payment protocol; a 429 on a retry would strand a
+    paid booking. That endpoint is protected by signature verification and by
+    `PaymentEvent.transaction_id` uniqueness instead.
+- **`create_booking` step 3a — a live booking blocks every *overlapping* slot, not
+  just the identical `slot_start`.** A fourth double-booking hole, found while writing
+  the rate-limit tests. `slot_step_minutes` (15) is half `duration_minutes` (30), so the
+  grid offers starts that overlap each other; `generate_slots` correctly hides the
+  neighbour of a live booking, but the booking path did not refuse it, and the partial
+  unique index — keyed on `(event_type_id, slot_start)` — cannot see a 15-minute shift.
+  A crafted POST, or simply a double-submit 15 minutes apart, produced two overlapping
+  1-1 calls and two overlapping calendar holds. Same *class* of defect as the
+  grid/path disagreements in the second pass: the grid is advice, the booking path is
+  what has to refuse. It raises `SlotTaken` (409, not 422 — the request is well-formed
+  and on-grid, it *conflicts*), which is what makes the UI refresh the grid.
+  Read-then-insert, so two concurrent requests could still both pass; a Postgres
+  exclusion constraint is the real answer when the schema stabilises, and SQLite cannot
+  express it at all.
+- **`tests/test_rate_limit.py` added**, and `tests/conftest.py` gained
+  `_reset_rate_limiters` — the limiters are process-global and keyed by client IP, so
+  without a per-test reset the ninth test to post a booking inherits the first test's
+  spending. Same isolation guarantee as `_fresh_schema`, for a different kind of state.
+- **Test-environment note:** if `tmp_path` fails at fixture setup with a
+  `PermissionError`, the sandbox is refusing to create `.pytest_tmp/` inside the repo.
+  Run `pytest --basetemp=/tmp/booking-pytest`. Nothing else about the suite changes.

@@ -56,8 +56,11 @@ async function proxy(request: NextRequest, segments: string[]) {
     return NextResponse.json(upstream.json, { status: upstream.status });
   } catch (error) {
     if (error instanceof BookingApiError) {
-      // Pass the booking service's own status through: 409 and 422 carry meaning
-      // the UI acts on ("this slot just went", "that time is not offered").
+      // Pass the booking service's own status through: 409, 422 and 429 all carry
+      // meaning the UI acts on ("this slot just went", "that time is not offered",
+      // "you are being throttled — wait, do not retry"). The Retry-After header is
+      // deliberately not forwarded; the UI tells the visitor to wait, it does not
+      // schedule its own retry.
       return NextResponse.json({ detail: error.message }, { status: error.status });
     }
     console.error("[booking proxy] upstream failure", error);

@@ -417,3 +417,59 @@ def test_a_live_hold_of_a_different_event_type_still_blocks(
             calendar=fake_calendar,
             payments=fake_payments,
         )
+
+
+# ---------------------------------------------------------------------------
+# Seam 4: a live booking must block its overlapping neighbours, not just its own
+# exact slot_start.  `slot_step_minutes` (15) is half `duration_minutes` (30), so
+# the grid offers starts that overlap each other.
+# ---------------------------------------------------------------------------
+
+
+def test_a_slot_overlapping_a_live_booking_is_refused(client, event_type):
+    """14:00 booked ⇒ 14:15 must be refused, not merely hidden from the grid.
+
+    `generate_slots` drops candidates that overlap a live booking, so the grid is
+    already correct.  The grid is advice; the booking path is what has to refuse.
+    Without this guard a crafted POST — or a double-submit 15 minutes apart — books
+    two 1-1 calls at the same time, and the owner gets two calls at once.
+    """
+    first = next_bookable_local()
+    overlapping = first + timedelta(minutes=15)
+
+    # Both starts are genuinely on the grid, so neither is refused for being off-grid.
+    listed = client.get(
+        "/api/slots",
+        params={"event_type_id": "consult-30", "date": first.date().isoformat()},
+    )
+    assert listed.status_code == 200
+    offered = offered_slots(listed)
+    assert first.astimezone(UTC) in offered
+    assert overlapping.astimezone(UTC) in offered
+
+    assert client.post("/api/bookings", json=payload(first)).status_code == 201
+
+    # The grid now hides the neighbour…
+    refreshed = client.get(
+        "/api/slots",
+        params={"event_type_id": "consult-30", "date": first.date().isoformat()},
+    )
+    assert overlapping.astimezone(UTC) not in offered_slots(refreshed)
+
+    # …and the booking path must refuse it too.  409 (SlotTaken), not 422: the
+    # request is well-formed and on-grid, it *conflicts* with a live booking — and
+    # the UI's 409 branch refreshes the grid, which is the useful response.
+    assert client.post("/api/bookings", json=payload(overlapping)).status_code == 409
+
+
+def test_the_owner_can_still_book_the_neighbouring_hour(client, event_type):
+    """The overlap guard must not be so broad that it blocks non-overlapping slots.
+
+    14:00–14:30 booked ⇒ 14:30 (starts exactly when it ends) is still free.  An
+    off-by-one here would silently halve the owner's availability.
+    """
+    first = next_bookable_local()
+    assert client.post("/api/bookings", json=payload(first)).status_code == 201
+
+    back_to_back = first + timedelta(minutes=30)
+    assert client.post("/api/bookings", json=payload(back_to_back)).status_code == 201

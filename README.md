@@ -106,6 +106,27 @@ sh -c 'mkdir -p /srv/secrets
 | `CELERY_BROKER_URL` | no | `""` | Railway Redis plugin (`REDIS_URL`). **Leave empty and no Celery app is built** — tasks run inline via `BackgroundTasks`, which is what dev and tests use. Set it only if you also run a worker. |
 | `CELERY_RESULT_BACKEND` | no | `""` | Same Redis; optional. |
 
+### Booking app — rate limiting (BUILD_PLAN §10)
+
+`POST /api/bookings` creates a calendar hold **and** a WeChat order per accepted call,
+so it is throttled per client IP. `GET /api/slots` is throttled more loosely for the
+same reason — one calendar fan-out per call, and exhausting Google's freebusy quota
+would break booking for everyone. `POST /api/payments/wechat/notify` is deliberately
+**never** throttled: WeChat's retry schedule is part of the payment protocol, and
+refusing a retry would strand a paid booking.
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `RATE_LIMIT_BOOKINGS_PER_HOUR` | no | `20` | Per IP. A human books a handful of times an hour, so this is generous. |
+| `RATE_LIMIT_SLOTS_PER_HOUR` | no | `300` | Per IP. Loose enough that browsing a month of dates never trips it. |
+| `TRUSTED_PROXY_DEPTH` | no | `0` | Number of trusted reverse proxies in front of the app. `0` uses the peer address. **Set this to `1` behind a single nginx / platform proxy**, otherwise the app sees only the proxy's IP and every visitor shares one budget. |
+
+Two honest limitations. **The counters are per process**, so the effective budget is
+these values times the number of uvicorn workers or replicas — `Dockerfile.booking`
+starts one worker, so a one-replica deploy is exact. And it is a **fixed** window, not
+a sliding one, so a caller can burst up to roughly twice the limit across a boundary.
+Both are fine for abuse control; neither is a billing primitive. See `app/rate_limit.py`.
+
 ### Relay service
 
 | Variable | Required | Default | Where to get it |
@@ -157,6 +178,14 @@ environment before importing the app, so **do not** point a test run at your `.e
 uv run pytest                                   # the whole suite
 uv run pytest tests/test_e2e.py -q              # the end-to-end suite
 uv run ruff check .                             # lint
+```
+
+**If `tmp_path` fails with a `PermissionError` at fixture setup**, the sandbox is refusing
+to create `.pytest_tmp/` inside the repo. Point pytest at a system temp root instead —
+nothing else changes:
+
+```sh
+uv run pytest --basetemp=/tmp/booking-pytest
 ```
 
 `tests/test_e2e.py` drives the real HTTP surface, and uses the **real**
@@ -266,9 +295,11 @@ dashboard or `railway variables`.
 - [x] **Admin routes behind `X-Admin-Token`**, compared with `hmac.compare_digest`.
 - [x] **Merchant private key and APIv3 key live in env/secret storage**, never in the repo;
       `secrets/` and `*.pem` are gitignored.
-- [ ] **Rate-limit `POST /api/bookings`.** **Not implemented in v1** — it creates a calendar
-      event and a payment order per call. Put a rate limit at the edge (mainland WAF /
-      reverse proxy) before go-live.
+- [x] **Rate-limit `POST /api/bookings`** — in-app, per client IP, via `app/rate_limit.py`
+      (`RATE_LIMIT_BOOKINGS_PER_HOUR`, default 20). Counters are per process and the window
+      is fixed, so it is abuse control rather than a hard quota; **still put a limit at the
+      edge** (mainland WAF / reverse proxy) before go-live, and set `TRUSTED_PROXY_DEPTH` to
+      match the number of proxies so the app can see real client addresses.
 - [ ] **Allow WeChat Pay's callback IP ranges through the firewall** on the mainland host,
       and block everything else on `/api/payments/wechat/notify`.
 
@@ -320,7 +351,11 @@ code, and none of them are done by deploying this repository.**
   sweeper. That is enough for v1.
 - **No Alembic migrations.** The schema is created with `create_all()` at startup; swap in
   Alembic when the schema stabilises.
-- **No rate limiting** on `POST /api/bookings` (see the security checklist).
+- **Rate limiting is per process and uses a fixed window.** With `--workers 2` or two
+  replicas the real budget is the configured limit times the number of processes, and a
+  caller can burst up to roughly twice the limit across a window boundary. Adequate for
+  abuse control, not a quota. A shared store (Redis, or a table) is the fix when a single
+  replica stops being enough. The notify endpoint is intentionally never throttled.
 - **Correctness never depends on Celery.** With no broker configured no Celery app is built
   and the three tasks run inline; a dead worker costs only stale calendar holds, never a
   stuck slot.

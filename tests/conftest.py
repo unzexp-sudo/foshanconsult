@@ -55,6 +55,13 @@ os.environ.update(
         "HOLD_MINUTES": "10",
         "SLOT_STEP_MINUTES": "15",
         "SWEEPER_INTERVAL_SECONDS": "60",
+        # Throttling is live in the suite, but low enough that a test can trip it
+        # without a hundred requests.  `_reset_rate_limiters` clears the counters
+        # between tests, so no test inherits another's budget — a single test would
+        # have to make more than 10 bookings to trip this by accident.
+        "RATE_LIMIT_BOOKINGS_PER_HOUR": "10",
+        "RATE_LIMIT_SLOTS_PER_HOUR": "20",
+        "TRUSTED_PROXY_DEPTH": "0",
     }
 )
 
@@ -71,6 +78,7 @@ from app.deps import (  # noqa: E402
 )
 from app.main import app as fastapi_app  # noqa: E402
 from app.models import Base, EventType  # noqa: E402
+from app.rate_limit import LIMITERS  # noqa: E402
 from app.seed import seed  # noqa: E402
 from tests.fakes import (  # noqa: E402
     FakeCalendarGateway,
@@ -137,6 +145,20 @@ def _fresh_schema() -> Iterator[None]:
     """Drop and recreate every table before each test — full isolation."""
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiters() -> Iterator[None]:
+    """Clear the throttle counters before each test.
+
+    The limiters are process-global and keyed by client IP, and every test hits
+    them from the same fake peer address, so without this the *ninth* test to post
+    a booking would get a 429 from the first test's spending.  Same isolation
+    guarantee as ``_fresh_schema``, for a different kind of state.
+    """
+    for limiter in LIMITERS:
+        limiter.reset()
     yield
 
 

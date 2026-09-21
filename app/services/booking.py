@@ -177,6 +177,35 @@ def create_booking(
     # 3. free the slot from any expired hold, in this same transaction
     expire_stale_holds(db, event_type_id=event_type.id, slot_start=start, now=moment)
 
+    # 3a. a live booking of this event type blocks every *overlapping* slot, not only
+    # the identical `slot_start`.  `slot_step_minutes` (15) is half `duration_minutes`
+    # (30), so the grid offers starts that overlap each other, and the partial unique
+    # index — keyed on `(event_type_id, slot_start)` — cannot see that.  Without this
+    # a POST of 14:15 succeeds while a live 14:00 hold exists, and the owner ends up
+    # with two overlapping 1-1 calls.  `generate_slots` already hides the neighbour;
+    # this is what makes the booking path agree with the grid.
+    #
+    # Read-then-insert, so two *concurrent* requests could still both pass.  The
+    # window is milliseconds and the outcome is two overlapping calendar holds, which
+    # are visible and fixable; a Postgres exclusion constraint is the real answer when
+    # the schema stabilises, and SQLite cannot express it at all.
+    slot_end = start + timedelta(minutes=event_type.duration_minutes)
+    live = (Booking.status == BookingStatus.PAID) | (
+        (Booking.status == BookingStatus.PENDING_PAYMENT) & (Booking.expires_at > moment)
+    )
+    clash = db.scalar(
+        select(Booking.reference)
+        .where(
+            Booking.event_type_id == event_type.id,
+            Booking.slot_start < slot_end,
+            Booking.slot_end > start,
+            live,
+        )
+        .limit(1)
+    )
+    if clash is not None:
+        raise SlotTaken(f"slot {start.isoformat()} overlaps booking {clash}")
+
     # 3b. the calendar is the source of truth for busy time.  `is_slot_on_grid`
     # cannot see it, and the DB index only guards against *our* bookings of THIS
     # event type, so without this an existing meeting is bookable by anyone who
@@ -184,7 +213,6 @@ def create_booking(
     # calendar's authority only where the DB has already adjudicated — see its
     # docstring for which of our own intervals are ignored, and why a live hold of
     # a *different* event type must keep blocking.
-    slot_end = start + timedelta(minutes=event_type.duration_minutes)
     owned = owned_intervals(db, start, slot_end, event_type_id=event_type.id, now=moment)
     for interval in calendar.freebusy(start, slot_end):
         busy_start, busy_end = _as_utc(interval.start), _as_utc(interval.end)

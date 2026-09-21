@@ -77,9 +77,15 @@ export function BookingFlow({ eventTypes, payBase }: Props) {
     try {
       const response = await clientBookingApi.listSlots(eventTypeId, date);
       setSlots(response.slots);
-    } catch {
+    } catch (caught) {
       setSlots([]);
-      setError("无法加载可预约时段，请稍后重试。");
+      // 429 = throttled (BUILD_PLAN §10).  Distinguish it so the visitor is told to
+      // wait rather than to "retry", which is the advice that makes it worse.
+      setError(
+        caught instanceof BookingApiError && caught.status === 429
+          ? "查询过于频繁，请稍等片刻再刷新时段。"
+          : "无法加载可预约时段，请稍后重试。",
+      );
     } finally {
       setLoadingSlots(false);
     }
@@ -125,6 +131,10 @@ export function BookingFlow({ eventTypes, payBase }: Props) {
         await loadSlots(); // the grid is stale now — refresh it
       } else if (caught instanceof BookingApiError && caught.status === 422) {
         setError("该时段不可预约，请另选一个时间。");
+      } else if (caught instanceof BookingApiError && caught.status === 429) {
+        // Throttled (BUILD_PLAN §10).  Retrying immediately makes it worse, so say
+        // so plainly and leave the slot selection intact.
+        setError("提交过于频繁，请稍等片刻再试。如持续出现，请通过官网联系我们。");
       } else {
         setError("提交失败，请稍后重试。");
       }

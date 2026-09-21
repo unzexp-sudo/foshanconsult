@@ -224,10 +224,14 @@
     fetch('/api/slots?event_type_id=' + encodeURIComponent(et) + '&date=' + encodeURIComponent(date), {
       headers: { Accept: 'application/json' }
     }).then(function (res) {
+      if (res.status === 429) {
+        slotsBox.innerHTML = '<p class="muted">查询过于频繁，请稍等片刻再刷新。</p>';
+        return null;
+      }
       if (!res.ok) throw new Error('slots request failed');
       return res.json();
     }).then(function (data) {
-      renderSlots(data.slots);
+      if (data) renderSlots(data.slots);
     }).catch(function () {
       slotsBox.innerHTML = '<p class="muted">加载失败，请稍后重试。</p>';
     });
@@ -270,6 +274,12 @@
       if (res.status === 422) {
         showError('该时段已不可预约，请重新选择时间。');
         loadSlots();
+        return;
+      }
+      if (res.status === 429) {
+        // Throttled (BUILD_PLAN §10).  Retrying at once makes it worse, so do not
+        // call loadSlots() here the way the 409/422 branches do.
+        showError('提交过于频繁，请稍等片刻再试。如持续出现，请通过官网联系我们。');
         return;
       }
       showError('创建订单失败，请稍后重试。');

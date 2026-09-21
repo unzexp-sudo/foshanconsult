@@ -17,6 +17,7 @@ from app.deps import get_calendar_gateway, get_payment_gateway
 from app.models import Booking, EventType
 from app.ports.calendar import CalendarGateway
 from app.ports.payments import PaymentGateway
+from app.rate_limit import rate_limit_bookings, rate_limit_slots
 from app.schemas import (
     BookingCreatedOut,
     BookingCreateIn,
@@ -56,6 +57,7 @@ def list_slots(
     date: date_type = Query(..., description="local date, YYYY-MM-DD"),
     db: Session = Depends(get_db),
     calendar: CalendarGateway = Depends(get_calendar_gateway),
+    _throttle: None = Depends(rate_limit_slots),
 ) -> SlotsOut:
     event_type = db.get(EventType, event_type_id)
     if event_type is None or not event_type.active:
@@ -80,6 +82,7 @@ def create_booking(
     db: Session = Depends(get_db),
     calendar: CalendarGateway = Depends(get_calendar_gateway),
     payments: PaymentGateway = Depends(get_payment_gateway),
+    _throttle: None = Depends(rate_limit_bookings),
 ) -> BookingCreatedOut:
     if payload.slot_start.tzinfo is None:
         raise HTTPException(
