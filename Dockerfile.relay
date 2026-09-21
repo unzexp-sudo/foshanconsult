@@ -11,7 +11,10 @@
 #
 # Build context is the repository root:
 #   docker build -f Dockerfile.relay -t booking-relay .
-#   docker run --rm -p 8001:8001 --env-file .env.relay booking-relay
+#   docker run --rm -p 8001:8000 --env-file .env.relay booking-relay
+#
+# Host 8001 → container 8000: the relay listens on ${PORT:-8000}, and publishing it
+# on 8001 locally keeps it from colliding with the booking app on 8000.
 
 FROM python:3.13-slim
 
