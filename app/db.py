@@ -21,7 +21,34 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+#: Schemes that name Postgres without naming a driver.
+_DRIVERLESS_POSTGRES = ("postgres://", "postgresql://")
+
+
+def normalise_database_url(url: str) -> str:
+    """Point a bare Postgres URL at psycopg v3.
+
+    Railway, Heroku and most managed providers hand out ``postgresql://…`` (or the
+    legacy ``postgres://…``).  SQLAlchemy reads that as "use psycopg2" — which this
+    project does not install; it installs ``psycopg`` v3 — so the app dies with
+    ``ModuleNotFoundError: No module named 'psycopg2'`` on a connection string that is
+    otherwise perfectly correct.  Rewriting the scheme here means ``DATABASE_URL`` can
+    be set straight from the provider's own reference variable instead of being
+    hand-edited, which is one less silent deployment failure.
+
+    An *explicit* driver (``postgresql+psycopg2://``, ``postgresql+asyncpg://``) is left
+    alone: that is a deliberate choice, and quietly overriding it would be worse than
+    failing loudly.
+    """
+    lowered = url.lower()
+    for scheme in _DRIVERLESS_POSTGRES:
+        if lowered.startswith(scheme):
+            return f"postgresql+psycopg://{url[len(scheme) :]}"
+    return url
+
+
 def _build_engine(url: str):
+    url = normalise_database_url(url)
     kwargs: dict = {"future": True, "pool_pre_ping": True}
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}

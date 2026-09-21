@@ -192,3 +192,48 @@ def test_booking_uses_aware_utc():
     from app.db import utcnow as _utcnow
 
     assert _utcnow().tzinfo is not None
+
+
+# ---------------------------------------------------------------------------
+# DATABASE_URL normalisation
+# ---------------------------------------------------------------------------
+#
+# Railway (and Heroku, and most managed providers) hand out `postgresql://…`.  SQLAlchemy
+# reads that as psycopg2, which is not installed, so a correct connection string produces
+# `ModuleNotFoundError: No module named 'psycopg2'` at import.  These pin the rewrite that
+# lets DATABASE_URL be set straight from the provider's reference variable.
+
+
+def test_bare_postgres_urls_are_pointed_at_psycopg3():
+    from app.db import normalise_database_url
+
+    for bare in ("postgresql://u:p@h:5432/db", "postgres://u:p@h:5432/db"):
+        assert normalise_database_url(bare) == "postgresql+psycopg://u:p@h:5432/db"
+
+
+def test_an_explicit_driver_is_left_alone():
+    """Overriding a deliberate choice would be worse than failing loudly."""
+    from app.db import normalise_database_url
+
+    for explicit in (
+        "postgresql+psycopg://u:p@h:5432/db",
+        "postgresql+psycopg2://u:p@h:5432/db",
+        "sqlite:///./booking.db",
+        "sqlite://",
+    ):
+        assert normalise_database_url(explicit) == explicit
+
+
+def test_normalisation_preserves_credentials_and_query_string():
+    from app.db import normalise_database_url
+
+    url = "postgresql://us:er@host.internal:5432/railway?sslmode=require"
+    assert normalise_database_url(url) == (
+        "postgresql+psycopg://us:er@host.internal:5432/railway?sslmode=require"
+    )
+
+
+def test_normalisation_is_case_insensitive_about_the_scheme():
+    from app.db import normalise_database_url
+
+    assert normalise_database_url("POSTGRESQL://u@h/db") == "postgresql+psycopg://u@h/db"

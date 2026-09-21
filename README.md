@@ -45,7 +45,7 @@ misbehave without it; the defaults are the local-dev values.
 | Variable | Required | Default | Where to get it |
 |---|---|---|---|
 | `APP_ENV` | prod: yes | `dev` | Set `prod`. `dev` exposes the interactive `/docs`; `prod` disables it. |
-| `DATABASE_URL` | prod: yes | `sqlite:///./booking.db` | Railway Postgres plugin. **Change the scheme to `postgresql+psycopg://…`** — the repo installs `psycopg` v3, not `psycopg2`, and a bare `postgresql://…` makes SQLAlchemy look for the wrong driver. |
+| `DATABASE_URL` | prod: yes | `sqlite:///./booking.db` | Railway Postgres plugin. Set it to `${{Postgres.DATABASE_URL}}` — a bare `postgresql://…` is fine, because `app/db.py` rewrites it to `postgresql+psycopg://…` at startup (the repo installs `psycopg` v3, not `psycopg2`). Writing the driver out by hand also works and is left untouched. |
 | `SECRET_KEY` | yes | `dev-only-change-me` | `openssl rand -hex 32`. Also the admin token for `GET /api/admin/bookings`. |
 | `PUBLIC_BASE_URL` | yes | `http://localhost:8000` | The ICP-filed payment domain, e.g. `https://pay.zhituoyuan.com`. The notify URL is derived from it. |
 | `DEFAULT_TIMEZONE` | no | `Asia/Shanghai` | IANA name; used for display and for the email body. |
@@ -249,8 +249,9 @@ Two ways to set it, either is fine:
 
 ### Order to deploy
 
-1. **Postgres.** Add the Railway Postgres plugin to the project. Note its `DATABASE_URL`
-   and rewrite the scheme to `postgresql+psycopg://`.
+1. **Postgres.** Add the Railway Postgres plugin to the project. On the booking service set
+   `DATABASE_URL` to `${{Postgres.DATABASE_URL}}` (a reference variable — it resolves on read,
+   so it cannot drift). No scheme rewriting is needed; `app/db.py` normalises it.
 2. **Relay first.** It has no dependency on the booking app, and the booking app needs its
    URL. Create a service from the repository, set its **Dockerfile path to `Dockerfile.relay`**
    (Settings → Build; or point its config-as-code path at `/railway.relay.json`), and set the
