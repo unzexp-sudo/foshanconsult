@@ -416,12 +416,22 @@ def test_slot_busy_only_in_the_calendar_is_refused(
 
 
 def test_busy_check_is_over_the_endpoint_the_calendar_reports(
-    client, event_type, fake_calendar
+    client, event_type, fake_calendar, freeze_now
 ):
-    """The same refusal must come out of POST /api/bookings as a 422, not a 500."""
+    """The same refusal must come out of POST /api/bookings as a 422, not a 500.
+
+    The clock MUST be frozen.  This test goes through the HTTP surface, which has no
+    ``now`` seam, while ``SLOT_LOCAL``/``SLOT_UTC`` are fixed instants — so without a
+    freeze the 4-hour minimum-notice window closes at 10:00 Shanghai on 2026-09-21 and
+    the request is refused for being *too soon* instead of for clashing with the
+    calendar.  Both are 422, so the status assertion alone would not have noticed; the
+    ``"calendar"`` assertion below is what catches it.  This test did in fact start
+    failing at 10:00 Shanghai on 2026-09-21 for exactly that reason.
+    """
     fake_calendar.add_busy(SLOT_UTC, SLOT_UTC + timedelta(minutes=30))
 
-    response = client.post("/api/bookings", json=payload())
+    with freeze_now(NOW):
+        response = client.post("/api/bookings", json=payload())
 
     assert response.status_code == 422
     assert "calendar" in response.json()["detail"].lower()

@@ -23,7 +23,7 @@ Two honest limitations of this implementation:
 
 1. **The counters live in this process.**  With ``--workers 2``, or two replicas,
    the real budget is the configured limit times the number of processes.
-   ``Dockerfile.booking`` starts a single uvicorn worker, so a one-replica deploy
+   ``Dockerfile`` starts a single uvicorn worker, so a one-replica deploy
    is exact; anything else is approximate.  A shared store (Redis, or a table) is
    the fix when that stops being true.
 2. **It is a fixed window, not a sliding one,** so a caller can burst up to

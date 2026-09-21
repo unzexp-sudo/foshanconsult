@@ -57,10 +57,10 @@ booking-service/
   pyproject.toml               FROZEN after foundation
   .env.example                 FROZEN after foundation
   README.md                    owner: M7
-  Dockerfile.booking           owner: M7
+  Dockerfile                   owner: M7   (booking image — MUST keep the plain name)
   Dockerfile.relay             owner: M7
-  railway.booking.json         owner: M7
-  railway.relay.json           owner: M7
+  railway.json                 owner: M7   (booking service config; Railway auto-reads this)
+  railway.relay.json           owner: M7   (relay service config; must be selected explicitly)
 
   app/
     main.py                    FOUNDATION (routers registered in try/except ImportError)
@@ -647,3 +647,30 @@ deliberate change to a frozen shape; the reasoning matters more than the diff.
 - **Test-environment note:** if `tmp_path` fails at fixture setup with a
   `PermissionError`, the sandbox is refusing to create `.pytest_tmp/` inside the repo.
   Run `pytest --basetemp=/tmp/booking-pytest`. Nothing else about the suite changes.
+
+### Integrator addenda, fourth pass (2026-09-21, after the first Railway deploy failed)
+
+- **`Dockerfile.booking` renamed to `Dockerfile`; `railway.booking.json` renamed to
+  `railway.json`.** The first deploy failed with *"Railpack failed to prepare the build"*,
+  and the service manifest showed `builder: RAILPACK`, `dockerfilePath: null` — the image
+  was never built from our Dockerfile. Two independent causes, and the second one is the
+  general lesson:
+  1. **Railway auto-detects a file named exactly `Dockerfile`.** Any other name is not
+     found, with no warning, and Railpack silently takes over. The plain name is what makes
+     the booking image build with zero per-service configuration. This matters more than
+     tidiness: config-as-code is deprecated, so a build that depends on `dockerfilePath`
+     from `railway.json` is a build that stops working at the cutoff. The plain filename is
+     the non-deprecated path.
+  2. **Railway reads `railway.json` / `railway.toml` at the repository root — nothing
+     else.** `railway.booking.json` was therefore invisible: the healthcheck path, the watch
+     patterns and the builder choice in it were all silently inactive, and the deploy ran on
+     Railway's defaults. `railway.relay.json` keeps its name only because the relay is a
+     second service that must select it explicitly.
+- **`x-envVars` removed from the Railway config.** Railway's config has no environment-variable
+  section; the key was documentation-only, and a non-schema key in a file Railway parses is a
+  risk with no upside. The README's env-var tables are the single source of truth for names.
+- **Known hazard, documented in the README:** a root `railway.json` applies to *every* service
+  deploying from this repository. Once the relay service exists, it must set its config-as-code
+  path to `/railway.relay.json`; otherwise it finds the root `Dockerfile`, builds the booking
+  image, and serves the booking app on the relay's domain — a failure that looks like success.
+

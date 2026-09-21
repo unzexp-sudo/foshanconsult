@@ -122,7 +122,7 @@ refusing a retry would strand a paid booking.
 | `TRUSTED_PROXY_DEPTH` | no | `0` | Number of trusted reverse proxies in front of the app. `0` uses the peer address. **Set this to `1` behind a single nginx / platform proxy**, otherwise the app sees only the proxy's IP and every visitor shares one budget. |
 
 Two honest limitations. **The counters are per process**, so the effective budget is
-these values times the number of uvicorn workers or replicas — `Dockerfile.booking`
+these values times the number of uvicorn workers or replicas — `Dockerfile`
 starts one worker, so a one-replica deploy is exact. And it is a **fixed** window, not
 a sliding one, so a caller can burst up to roughly twice the limit across a boundary.
 Both are fine for abuse control; neither is a billing primitive. See `app/rate_limit.py`.
@@ -203,30 +203,64 @@ as the build context.
 
 | File | What it builds |
 |---|---|
-| `Dockerfile.booking` | `uvicorn app.main:app`, port `$PORT` (default 8000), non-root. Installs every dependency in `pyproject.toml`, copies only `app/`. |
+| `Dockerfile` | `uvicorn app.main:app`, port `$PORT` (default 8000), non-root. Installs every dependency in `pyproject.toml`, copies only `app/`. |
 | `Dockerfile.relay` | `uvicorn relay.main:app`, port `$PORT` (default 8000), non-root. Installs only the subset of `pyproject.toml` that `relay/**` imports — no SQLAlchemy, Celery, Redis, segno, Jinja2, cryptography or psycopg — and copies only `relay/`. |
 
 ```sh
-docker build -f Dockerfile.booking -t booking-service .
-docker build -f Dockerfile.relay   -t booking-relay .
+docker build -t booking-service .
+docker build -f Dockerfile.relay -t booking-relay .
 
 docker run --rm -p 8000:8000 --env-file .env booking-service
 docker run --rm -p 8001:8000 --env-file .env.relay booking-relay
 ```
+
+### The booking Dockerfile must be named `Dockerfile`
+
+This is not cosmetic, and it has already cost one failed deployment.
+
+Railway's builder selection is: **use a file named exactly `Dockerfile` if the service's
+root directory contains one; otherwise default to Railpack.** A Dockerfile under any other
+name is simply not found — there is no warning, and Railpack takes over. The first deploy of
+this repository failed with
+
+```
+Build › Build image   Railpack failed to prepare the build.
+```
+
+while the service manifest showed `builder: RAILPACK`, `dockerfilePath: null`. Nothing was
+wrong with the Dockerfile; it was never looked at.
+
+So `Dockerfile` (booking) keeps the plain name and builds with **zero per-service
+configuration**. `Dockerfile.relay` cannot also be called `Dockerfile`, so the **relay
+service must set its Dockerfile path explicitly** — see step 2 below.
+
+Two ways to set it, either is fine:
+
+| Where | Setting | Value |
+|---|---|---|
+| Dashboard | Service → Settings → Build → Builder / Dockerfile Path | `Dockerfile` / `Dockerfile.relay` |
+| Repo | `railway.json` (booking) and `railway.relay.json` (relay), selected per service | auto-read for the booking service; the relay needs its config-as-code path set |
+
+> **A root `railway.json` applies to every service that deploys from this repository.** The
+> booking service is the one it is written for. When you add the relay service, point its
+> config-as-code path at `/railway.relay.json` — otherwise it will find the root `Dockerfile`,
+> build the *booking* image, and run the booking app on the relay's domain. That failure is
+> silent: the build succeeds and the wrong service answers.
 
 ### Order to deploy
 
 1. **Postgres.** Add the Railway Postgres plugin to the project. Note its `DATABASE_URL`
    and rewrite the scheme to `postgresql+psycopg://`.
 2. **Relay first.** It has no dependency on the booking app, and the booking app needs its
-   URL. Create a service from the repository, point its config-as-code path at
-   `/railway.relay.json`, and set the relay variables from the table above
-   (`railway variables --set RELAY_SECRET=…` or the dashboard). Check
-   `https://<relay-domain>/healthz`.
-3. **Booking app.** Create a second service from the same repository, point its
-   config-as-code path at `/railway.booking.json`, set `CALENDAR_RELAY_URL` to the relay's
-   public domain, `CALENDAR_RELAY_SECRET` to the same value as `RELAY_SECRET`, and the
-   rest of the booking variables. Check `https://<booking-domain>/healthz`.
+   URL. Create a service from the repository, set its **Dockerfile path to `Dockerfile.relay`**
+   (Settings → Build; or point its config-as-code path at `/railway.relay.json`), and set the
+   relay variables from the table above (`railway variables --set RELAY_SECRET=…` or the
+   dashboard). Check `https://<relay-domain>/healthz`.
+3. **Booking app.** Create a second service from the same repository. If you use
+   config-as-code, point its path at `/railway.json`; if you do not, set Builder =
+   `Dockerfile` and Dockerfile Path = `Dockerfile`. Set `CALENDAR_RELAY_URL` to the relay's
+   public domain, `CALENDAR_RELAY_SECRET` to the same value as `RELAY_SECRET`, and the rest
+   of the booking variables. Check `https://<booking-domain>/healthz`.
 4. **Seed once.** Run `python -m app.seed` against the deployed service (Railway one-off
    command, or a `preDeployCommand`). Without it the booking page has no event type.
 5. **Sweeper.** Add a third service from the same image with the start command
@@ -235,16 +269,16 @@ docker run --rm -p 8001:8000 --env-file .env.relay booking-relay
 6. **Register the notify URL.** Copy the derived
    `https://<booking-domain>/api/payments/wechat/notify` into 商户平台 → 产品中心 → 开发配置.
 
-Both `railway.booking.json` and `railway.relay.json` set `healthcheckPath` to `/healthz`
-and use the `DOCKERFILE` builder with an explicit `dockerfilePath`. Railway's
-config-as-code has **no environment-variable section**, so the variable names are listed
-under a documentation-only `x-envVars` key (Railway ignores it); set the values with the
-dashboard or `railway variables`.
+`railway.json` and `railway.relay.json` set `healthcheckPath` to `/healthz` and use the
+`DOCKERFILE` builder with an explicit `dockerfilePath`. They contain only keys Railway
+documents — an earlier revision carried the variable names under a non-schema `x-envVars`
+key, which is gone: the env var tables above are the single source of truth for names.
 
 > **Config-as-code is deprecated.** Railway's docs mark `railway.json` / `railway.toml` as
 > legacy, keep them working only until **2026-12-01**, and do not let new services opt in.
-> The forward path is `.railway/railway.ts` (Infrastructure as Code). These files are
-> provided because they were requested; plan the migration before the cutoff.
+> The forward path is `.railway/railway.ts` (Infrastructure as Code). This is exactly why
+> the booking image does **not** depend on `railway.json` to be built — the plain
+> `Dockerfile` name is the non-deprecated path. Plan the migration before the cutoff.
 
 ### Decisions (D1–D5)
 

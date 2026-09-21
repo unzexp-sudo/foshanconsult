@@ -7,8 +7,17 @@
 # endpoint, and it never holds a Google credential in production: calendar work
 # goes through the relay service (see Dockerfile.relay).
 #
+# WHY THIS FILE IS NAMED `Dockerfile` AND NOT `Dockerfile.booking`:
+# Railway auto-detects a file named exactly `Dockerfile` in the service's root
+# directory and builds with it.  A differently-named Dockerfile is *not* found, so
+# Railway silently falls back to Railpack — which failed this build with
+# "Railpack failed to prepare the build".  The plain name is what makes the booking
+# service build with no per-service configuration at all.  Dockerfile.relay keeps
+# its name because the relay is a second service and must set its Dockerfile path
+# explicitly; see the README's deployment section.
+#
 # Build context is the repository root:
-#   docker build -f Dockerfile.booking -t booking-service .
+#   docker build -t booking-service .
 #   docker run --rm -p 8000:8000 --env-file .env booking-service
 #
 # The periodic sweeper is this same image with a different command:
