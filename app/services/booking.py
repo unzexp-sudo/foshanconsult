@@ -177,18 +177,21 @@ def create_booking(
     # 3. free the slot from any expired hold, in this same transaction
     expire_stale_holds(db, event_type_id=event_type.id, slot_start=start, now=moment)
 
-    # 3a. a live booking of this event type blocks every *overlapping* slot, not only
-    # the identical `slot_start`.  `slot_step_minutes` (15) is half `duration_minutes`
-    # (30), so the grid offers starts that overlap each other, and the partial unique
-    # index — keyed on `(event_type_id, slot_start)` — cannot see that.  Without this
-    # a POST of 14:15 succeeds while a live 14:00 hold exists, and the owner ends up
-    # with two overlapping 1-1 calls.  `generate_slots` already hides the neighbour;
-    # this is what makes the booking path agree with the grid.
+    # 3a. a live booking of this event type blocks every *overlapping* slot, not
+    # only the identical `slot_start`.  The grid no longer offers overlapping
+    # starts — `effective_step_minutes` clamps the step to the duration — so this
+    # is now the backstop for the one case the grid cannot cover: a duplicate
+    # POST of a slot that was free when the page loaded and is not free now.  It
+    # turns that race into a clean 409 before the INSERT, which is what lets the
+    # UI refresh the grid instead of reporting a generic failure.
     #
-    # Read-then-insert, so two *concurrent* requests could still both pass.  The
-    # window is milliseconds and the outcome is two overlapping calendar holds, which
-    # are visible and fixable; a Postgres exclusion constraint is the real answer when
-    # the schema stabilises, and SQLite cannot express it at all.
+    # It also keeps the data correct if the step is ever un-clamped again, and
+    # covers any path that reaches `create_booking` without going through the
+    # grid.  Read-then-insert, so two *concurrent* requests could still both
+    # pass — the window is milliseconds, the outcome is two visible overlapping
+    # calendar holds, and `uq_active_slot` still refuses the identical start.  A
+    # Postgres exclusion constraint is the real answer when the schema
+    # stabilises, and SQLite cannot express it at all.
     slot_end = start + timedelta(minutes=event_type.duration_minutes)
     live = (Booking.status == BookingStatus.PAID) | (
         (Booking.status == BookingStatus.PENDING_PAYMENT) & (Booking.expires_at > moment)

@@ -5,8 +5,11 @@ Everything that leaves this module is timezone-aware UTC.
 
 Two ideas do all the work:
 
-* the grid is ``slot_step_minutes`` aligned to each rule's own ``start_local``,
-  and a slot must fit *entirely* inside the rule window;
+* the grid is ``effective_step_minutes`` aligned to each rule's own
+  ``start_local``, and a slot must fit *entirely* inside the rule window;
+* no two offered starts ever **overlap each other** — see
+  :func:`effective_step_minutes` for the step rule and the drop-overlapping pass
+  at the end of :func:`generate_slots`;
 * a slot is offered only if it overlaps neither calendar busy time (expanded by
   the buffers) nor a *live* booking — where "live" applies lazy expiry, so an
   expired ``pending_payment`` hold never occupies its slot.
@@ -28,6 +31,7 @@ from app.ports.calendar import CalendarGateway
 
 __all__ = [
     "Slot",
+    "effective_step_minutes",
     "generate_slots",
     "is_slot_on_grid",
     "local_date_bounds",
@@ -110,13 +114,36 @@ def owned_intervals(
     return ignored
 
 
+def effective_step_minutes(event_type: EventType) -> int:
+    """The grid step actually used — never finer than the slot's own duration.
+
+    ``slot_step_minutes`` is a **single global knob** while ``duration_minutes``
+    is **per event type**, and that asymmetry is a trap.  With a 30-minute
+    service and a 15-minute step the grid offers ``09:00–09:30`` *and*
+    ``09:15–09:45`` as two separate buttons.  They are not two appointments —
+    they are the same half hour, and only one of them can ever be sold.
+
+    The visible damage is worse than a wasted button: the visitor picks a time
+    the site has just shown as free and :func:`~app.services.booking.create_booking`
+    refuses it as an overlap (409), which reads as a broken site.  The grid and
+    the write path must agree, so the step is clamped **here** rather than
+    validated in config — a clamp is per event type, and config is global.
+
+    Clamping is a no-op for every coherent configuration (``step >= duration``,
+    e.g. hourly starts for a 30-minute call) and only removes the incoherent
+    ones.  ``is_slot_on_grid`` calls this too, so a start the grid offers is
+    always a start the booking path accepts.
+    """
+    return max(settings.slot_step_minutes, event_type.duration_minutes)
+
+
 def _rule_grid(
     event_type: EventType, rule: AvailabilityRule, local_date: date
 ) -> list[datetime]:
     """Aware-local candidate starts for one rule on one local date."""
     tz = _zone(event_type)
     duration = timedelta(minutes=event_type.duration_minutes)
-    step = timedelta(minutes=settings.slot_step_minutes)
+    step = timedelta(minutes=effective_step_minutes(event_type))
     if duration <= timedelta(0) or step <= timedelta(0):
         return []
 
@@ -149,7 +176,9 @@ def is_slot_on_grid(
     if start > moment + timedelta(days=event_type.max_days_ahead):
         return False
 
-    step_seconds = settings.slot_step_minutes * 60
+    # The SAME step the grid used, or the two would disagree about which starts
+    # are bookable — see `effective_step_minutes`.
+    step_seconds = effective_step_minutes(event_type) * 60
     if step_seconds <= 0:
         return False
 
@@ -181,7 +210,11 @@ def generate_slots(
     calendar: CalendarGateway,
     now: datetime | None = None,
 ) -> list[Slot]:
-    """The bookable grid for one local date, ascending by start (aware UTC)."""
+    """The bookable grid for one local date, ascending by start (aware UTC).
+
+    The returned starts are guaranteed to be **pairwise non-overlapping**, so
+    every button the visitor sees is a distinct appointment.
+    """
     moment = _as_utc(now or utcnow())
     duration = timedelta(minutes=event_type.duration_minutes)
     day_start, day_end = local_date_bounds(event_type, local_date)
@@ -193,7 +226,7 @@ def generate_slots(
             event_type.buffer_before_minutes
             + event_type.buffer_after_minutes
             + event_type.duration_minutes
-            + settings.slot_step_minutes
+            + effective_step_minutes(event_type)
         )
     )
     # Our own holds are filtered out on their RAW bounds, before the buffer is
@@ -224,7 +257,7 @@ def generate_slots(
     ).all()
     taken = [(_as_utc(row[0]), _as_utc(row[1])) for row in rows]
 
-    starts: set[datetime] = set()
+    candidates: set[datetime] = set()
     for rule in event_type.availability_rules:
         if rule.weekday != local_date.weekday():
             continue
@@ -241,6 +274,17 @@ def generate_slots(
                 continue
             if any(candidate < taken_end and end > taken_start for taken_start, taken_end in taken):
                 continue
-            starts.add(candidate)
+            candidates.add(candidate)
 
-    return [Slot(start=start, end=start + duration) for start in sorted(starts)]
+    # Two rules can be aligned differently — one on the hour, another on the
+    # quarter — and `is_slot_on_grid` judges each rule's own offset, so the
+    # clamped step alone cannot stop two rules from offering the same half hour
+    # at 09:00 and 09:15.  Keep the earliest and drop any start that overlaps a
+    # slot already kept, so the grid is non-overlapping by construction.
+    starts: list[datetime] = []
+    for candidate in sorted(candidates):
+        if starts and candidate < starts[-1] + duration:
+            continue
+        starts.append(candidate)
+
+    return [Slot(start=start, end=start + duration) for start in starts]

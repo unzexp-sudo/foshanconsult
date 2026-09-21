@@ -424,6 +424,15 @@ class Slot:
 def local_date_bounds(event_type: EventType, local_date: date) -> tuple[datetime, datetime]
     """The [start, end) UTC window covering `local_date` in event_type.timezone."""
 
+def effective_step_minutes(event_type: EventType) -> int
+    """The grid step actually used: max(slot_step_minutes, duration_minutes).
+
+    A step finer than the duration puts two overlapping starts in the grid
+    (09:00-09:30 *and* 09:15-09:45 for a 30-minute service), so the step is
+    clamped per event type. `is_slot_on_grid` uses the same value, which is what
+    keeps the grid and the booking path agreeing about which starts exist.
+    """
+
 def generate_slots(
     db: Session,
     event_type: EventType,
@@ -434,10 +443,10 @@ def generate_slots(
 ) -> list[Slot]
     """The bookable grid for one local date.
 
-    On the `slot_step_minutes` grid; inside an AvailabilityRule window for that
-    weekday; inside [now + min_notice_minutes, now + max_days_ahead];
+    On the `effective_step_minutes` grid; inside an AvailabilityRule window for
+    that weekday; inside [now + min_notice_minutes, now + max_days_ahead];
     not overlapping calendar busy time; not overlapping a live booking.
-    Ascending by start.
+    Ascending by start, and pairwise non-overlapping.
     """
 
 def is_slot_on_grid(
@@ -673,4 +682,54 @@ deliberate change to a frozen shape; the reasoning matters more than the diff.
   deploying from this repository. Once the relay service exists, it must set its config-as-code
   path to `/railway.relay.json`; otherwise it finds the root `Dockerfile`, builds the booking
   image, and serves the booking app on the relay's domain — a failure that looks like success.
+
+### Integrator addenda, fifth pass (2026-09-21, the slot grid offered the same half hour twice)
+
+- **The grid step is now clamped to the slot duration** — `effective_step_minutes(event_type)`
+  in `app/services/availability.py`, used by `_rule_grid`, `is_slot_on_grid` and the busy-time
+  pad. Reported from a screenshot of the live booking page: a 30-minute consultation listed
+  `09:00 09:15 09:30 09:45 …` — 35 buttons for a day that holds 18 appointments.
+  - **The root cause is an asymmetry, not a wrong value.** `slot_step_minutes` is a single
+    global knob while `duration_minutes` is per event type, so nothing prevented a step finer
+    than the duration. 09:00–09:30 and 09:15–09:45 then become two buttons describing the same
+    half hour, and only one of them can ever be sold.
+  - **The real damage was that the two sides disagreed.** The grid offered 09:15;
+    `create_booking` refused it (409) because the *third* pass added an overlap guard. A visitor
+    therefore tapped a time the page had just shown as free and was told it was taken. Clamping
+    fixes the grid, and because `is_slot_on_grid` uses the same clamped step the refusal is now
+    off-grid (422) — grid and write path finally agree. Same class as the second- and third-pass
+    defects: *the grid is advice, the booking path is what has to refuse* — except here the
+    advice itself was wrong.
+  - **Clamping is per event type; validation could not be.** A config check is impossible — the
+    duration lives on a database row, not in settings — and no single global default is right
+    for both a 15-minute and a 60-minute offering. `max(step, duration)` is a no-op for every
+    coherent configuration (hourly starts for a 30-minute call still work) and removes only the
+    incoherent ones.
+  - **A second mechanism is still needed for off-grid rule alignment.** `is_slot_on_grid` judges
+    each rule against *that rule's own* start, so two rules — one on the hour, one on the
+    quarter — can still yield 09:00 and 09:15. `generate_slots` therefore drops any candidate
+    that overlaps a slot it has already kept, making the returned grid pairwise non-overlapping
+    by construction.
+  - **`create_booking` step 3a stays.** With the grid clamped a neighbour can no longer be
+    offered, so the guard's remaining reachable case is a duplicate POST of a slot that was free
+    when the page loaded — exactly the race that must return 409 so the UI refreshes. It also
+    keeps the data correct if the step is ever un-clamped. Its comment now says so.
+- **`tests/conftest.py` deliberately keeps `SLOT_STEP_MINUTES=15`** — *finer* than the 30-minute
+  fixture, i.e. the adversarial configuration. Every availability test therefore runs against
+  the case the clamp exists for, and a genuinely fine grid is exercised by using a 15-minute
+  *service* rather than a 15-minute step on a 30-minute one.
+- **New tests:** `test_the_step_is_clamped_to_the_duration`,
+  `test_a_coherent_fine_grid_is_left_alone`, `test_the_grid_never_offers_two_overlapping_starts`
+  and `test_is_slot_on_grid_uses_the_clamped_step`, plus three on the HTTP surface —
+  `test_a_start_the_grid_never_offered_is_refused`,
+  `test_a_duplicate_post_of_a_live_slot_is_a_conflict` and `test_the_grid_offers_no_overlapping_pair`.
+  The last three replace the third pass's `test_a_slot_overlapping_a_live_booking_is_refused`,
+  whose premise (that 14:15 is on the grid) no longer holds.
+- **Deployed configuration:** `SLOT_STEP_MINUTES=30` was also set on the Railway service so the
+  stored value matches the grid the clamp produces. With the clamp in place the variable is belt
+  and braces; it is set because whoever reads the Railway dashboard should not have to know the
+  clamp exists. Verified live: `GET /api/slots` went from 35 starts to 18 — 09:00 → 17:30 in
+  30-minute steps.
+- **Repo gap noticed while doing this:** there is no `.github/` directory, so nothing runs the
+  suite on push. Every "tests pass" claim in these addenda is a local run.
 

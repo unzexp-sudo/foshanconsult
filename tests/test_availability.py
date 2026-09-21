@@ -2,6 +2,12 @@
 
 Everything is driven through the real ORM/SQLite session and the fake calendar —
 no mocks of the code under test.
+
+The grid step is clamped to the slot duration (``effective_step_minutes``), so a
+30-minute service always gets a 30-minute grid no matter what ``SLOT_STEP_MINUTES``
+says.  conftest deliberately sets the step to 15 — *finer* than the duration —
+so every test below runs against the adversarial configuration.  A genuinely fine
+grid is exercised by using a 15-minute service instead.
 """
 
 from __future__ import annotations
@@ -11,9 +17,11 @@ from datetime import UTC, date, datetime, time, timedelta
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import AvailabilityRule, Booking, BookingStatus, EventType
 from app.services.availability import (
     Slot,
+    effective_step_minutes,
     generate_slots,
     is_slot_on_grid,
     local_date_bounds,
@@ -116,6 +124,66 @@ def test_local_date_bounds_are_the_utc_window_for_the_local_date(db_session):
 
 
 # ---------------------------------------------------------------------------
+# The step is clamped to the duration, so the grid cannot offer overlapping starts
+# ---------------------------------------------------------------------------
+
+
+def test_the_step_is_clamped_to_the_duration(db_session):
+    """``slot_step_minutes`` is global; ``duration_minutes`` is per event type.
+
+    conftest sets the step to 15 and this service runs for 30 minutes, so an
+    unclamped grid would offer 09:00–09:30 *and* 09:15–09:45 as two buttons for
+    the same half hour.  Only one of them can ever be sold, so the grid must not
+    offer both.
+    """
+    event_type = make_event_type(
+        db_session, timezone="UTC", duration_minutes=30, rules=((0, time(9, 0), time(11, 0)),)
+    )
+    assert settings.slot_step_minutes == 15, "conftest must keep this adversarial"
+    assert effective_step_minutes(event_type) == 30
+    assert starts(db_session, event_type, MONDAY, utc(2026, 9, 21, 0, 0)) == [
+        utc(9, 0),
+        utc(9, 30),
+        utc(10, 0),
+        utc(10, 30),
+    ]
+
+
+def test_a_coherent_fine_grid_is_left_alone(db_session):
+    """A 15-minute service on a 15-minute step keeps its 15-minute grid.
+
+    The clamp removes incoherent configurations only; it is a no-op here.
+    """
+    event_type = make_event_type(
+        db_session, timezone="UTC", duration_minutes=15, rules=((0, time(9, 0), time(10, 0)),)
+    )
+    assert effective_step_minutes(event_type) == 15
+    assert starts(db_session, event_type, MONDAY, utc(2026, 9, 21, 0, 0)) == [
+        utc(9, 0),
+        utc(9, 15),
+        utc(9, 30),
+        utc(9, 45),
+    ]
+
+
+def test_the_grid_never_offers_two_overlapping_starts(db_session):
+    """The invariant the clamp exists to guarantee: one button = one appointment.
+
+    Also covered by the drop-overlapping pass, which catches two rules aligned
+    to different offsets — a case the clamp alone cannot fix.
+    """
+    event_type = make_event_type(
+        db_session, timezone="UTC", duration_minutes=30, rules=((0, time(9, 0), time(13, 0)),)
+    )
+    slots = generate_slots(
+        db_session, event_type, MONDAY, calendar=FakeCalendarGateway(), now=utc(2026, 9, 21, 0, 0)
+    )
+    assert len(slots) > 1
+    for earlier, later in zip(slots, slots[1:], strict=False):
+        assert earlier.end <= later.start, f"{earlier.start} overlaps {later.start}"
+
+
+# ---------------------------------------------------------------------------
 # Grid shape: weekday, timezone, alignment, fit
 # ---------------------------------------------------------------------------
 
@@ -127,8 +195,8 @@ def test_grid_is_local_wall_clock_in_the_event_timezone(db_session):
     slots = generate_slots(
         db_session, event_type, MONDAY, calendar=FakeCalendarGateway(), now=utc(2026, 9, 21, 0, 0)
     )
-    assert [slot.start for slot in slots] == [utc(1, 0), utc(1, 15), utc(1, 30)]
-    assert [slot.end for slot in slots] == [utc(1, 30), utc(1, 45), utc(2, 0)]
+    assert [slot.start for slot in slots] == [utc(1, 0), utc(1, 30)]
+    assert [slot.end for slot in slots] == [utc(1, 30), utc(2, 0)]
 
 
 def test_grid_honours_a_different_timezone(db_session):
@@ -137,7 +205,6 @@ def test_grid_honours_a_different_timezone(db_session):
     )
     assert starts(db_session, event_type, MONDAY, utc(2026, 9, 21, 0, 0)) == [
         utc(9, 0),
-        utc(9, 15),
         utc(9, 30),
     ]
 
@@ -150,7 +217,6 @@ def test_only_rules_for_the_matching_weekday_produce_slots(db_session):
     assert starts(db_session, event_type, MONDAY, now) == []
     assert starts(db_session, event_type, TUESDAY, now) == [
         utc(2026, 9, 22, 9, 0),
-        utc(2026, 9, 22, 9, 15),
         utc(2026, 9, 22, 9, 30),
     ]
 
@@ -165,13 +231,19 @@ def test_slot_must_fit_entirely_inside_the_rule_window(db_session):
 
 
 def test_overlapping_rules_are_unioned_without_duplicates(db_session):
+    """Two rules with different offsets must not re-introduce an overlap.
+
+    The second rule starts at 09:15, which is a legal grid start *for that rule*,
+    so `is_slot_on_grid` admits it.  It overlaps the 09:00 slot from the first
+    rule, and the drop-overlapping pass is what removes it.
+    """
     event_type = make_event_type(
         db_session,
         timezone="UTC",
         rules=((0, time(9, 0), time(10, 0)), (0, time(9, 15), time(10, 0))),
     )
     result = starts(db_session, event_type, MONDAY, utc(2026, 9, 21, 0, 0))
-    assert result == [utc(9, 0), utc(9, 15), utc(9, 30)]
+    assert result == [utc(9, 0), utc(9, 30)]
     assert len(result) == len(set(result))
 
 
@@ -191,9 +263,9 @@ def test_buffer_after_expands_calendar_busy(db_session):
     calendar.add_busy(utc(10, 0), utc(10, 30))
     result = starts(db_session, event_type, MONDAY, utc(2026, 9, 21, 0, 0), calendar)
     assert utc(9, 30) in result
-    for blocked in (utc(9, 45), utc(10, 0), utc(10, 15), utc(10, 30)):
+    for blocked in (utc(10, 0), utc(10, 30)):
         assert blocked not in result
-    assert utc(10, 45) in result
+    assert utc(11, 0) in result  # 10:45 is past the expanded busy block
 
 
 def test_buffer_before_expands_calendar_busy(db_session):
@@ -206,8 +278,8 @@ def test_buffer_before_expands_calendar_busy(db_session):
     calendar = FakeCalendarGateway()
     calendar.add_busy(utc(10, 0), utc(10, 30))
     result = starts(db_session, event_type, MONDAY, utc(2026, 9, 21, 0, 0), calendar)
-    assert utc(9, 15) in result
-    for blocked in (utc(9, 30), utc(9, 45), utc(10, 0), utc(10, 15)):
+    assert utc(9, 0) in result
+    for blocked in (utc(9, 30), utc(10, 0)):
         assert blocked not in result
     assert utc(10, 30) in result
 
@@ -226,7 +298,7 @@ def test_min_notice_minutes_excludes_early_slots(db_session):
     )
     result = starts(db_session, event_type, MONDAY, utc(2026, 9, 21, 6, 0))
     assert result[0] == utc(10, 0)  # exactly now + 240m is allowed
-    assert utc(9, 45) not in result
+    assert utc(9, 0) not in result
 
 
 def test_max_days_ahead_limits_the_horizon(db_session):
@@ -237,7 +309,7 @@ def test_max_days_ahead_limits_the_horizon(db_session):
         rules=((0, time(9, 0), time(10, 0)), (1, time(9, 0), time(10, 0))),
     )
     now = utc(2026, 9, 21, 0, 0)
-    assert starts(db_session, event_type, MONDAY, now) == [utc(9, 0), utc(9, 15), utc(9, 30)]
+    assert starts(db_session, event_type, MONDAY, now) == [utc(9, 0), utc(9, 30)]
     assert starts(db_session, event_type, TUESDAY, now) == []  # beyond now + 1 day
 
 
@@ -258,7 +330,7 @@ def test_live_pending_hold_removes_the_slot(db_session):
         status=BookingStatus.PENDING_PAYMENT,
         expires_at=now + timedelta(minutes=10),
     )
-    # 09:00–09:30 is held; 09:15–09:45 would overlap it, 09:30–10:00 still fits.
+    # 09:00–09:30 is held; 09:30–10:00 still fits.
     assert starts(db_session, event_type, MONDAY, now) == [utc(9, 30)]
 
 
@@ -289,7 +361,7 @@ def test_expired_hold_is_not_treated_as_live(db_session):
         status=BookingStatus.PENDING_PAYMENT,
         expires_at=now - timedelta(seconds=1),  # lazily expired
     )
-    assert starts(db_session, event_type, MONDAY, now) == [utc(9, 0), utc(9, 15), utc(9, 30)]
+    assert starts(db_session, event_type, MONDAY, now) == [utc(9, 0), utc(9, 30)]
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +385,22 @@ def test_is_slot_on_grid_covers_grid_notice_and_window(db_session):
     assert (
         is_slot_on_grid(db_session, event_type, utc(2026, 9, 24, 9, 0), now=now) is False
     )  # beyond the horizon
+
+
+def test_is_slot_on_grid_uses_the_clamped_step(db_session):
+    """The validator must use the SAME step as the grid, or they disagree.
+
+    A 30-minute service on a 15-minute step: the grid no longer offers 09:15, so
+    the booking path must not accept it either.  Otherwise a crafted POST books
+    two overlapping 1-1 calls.
+    """
+    event_type = make_event_type(
+        db_session, timezone="UTC", duration_minutes=30, rules=((0, time(9, 0), time(10, 0)),)
+    )
+    now = utc(2026, 9, 21, 0, 0)
+    assert is_slot_on_grid(db_session, event_type, utc(9, 0), now=now) is True
+    assert is_slot_on_grid(db_session, event_type, utc(9, 15), now=now) is False
+    assert is_slot_on_grid(db_session, event_type, utc(9, 30), now=now) is True
 
 
 def test_is_slot_on_grid_ignores_the_calendar_and_the_db(db_session):

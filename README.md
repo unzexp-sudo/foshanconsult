@@ -95,7 +95,7 @@ sh -c 'mkdir -p /srv/secrets
 | Variable | Required | Default | Where to get it |
 |---|---|---|---|
 | `HOLD_MINUTES` | no | `10` | How long a slot is held while unpaid. |
-| `SLOT_STEP_MINUTES` | no | `15` | Slot-grid step. |
+| `SLOT_STEP_MINUTES` | no | `15` | Grid step, **clamped up to the slot duration**. A 30-minute service always gets a 30-minute grid, so the visitor never sees 09:00 and 09:15 offered as two appointments for the same half hour. Raise it for wider gaps (`60` = hourly starts); setting it below the duration has no effect. |
 | `SWEEPER_INTERVAL_SECONDS` | no | `60` | Loop interval of `python -m app.services.sweeper`. |
 | `EMAIL_BACKEND` | no | `console` | `smtp` in prod, `console` for dev (prints to stdout). |
 | `SMTP_HOST` | when `smtp` | `""` | Your mail provider. |
