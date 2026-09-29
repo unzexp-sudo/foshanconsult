@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}{{ event.title }} · 知托源{% endblock %}
+
+{% block content %}
+<header class="page-head">
+  <p class="eyebrow">付费会议</p>
+  <h1>{{ event.title }}</h1>
+  {% if event.description %}
+  <p class="lede">{{ event.description }}</p>
+  {% endif %}
+</header>
+
+<section class="card">
+  <h2 class="card-title">会议信息</h2>
+  <dl class="facts">
+    <div>
+      <dt>时间</dt>
+      <dd>{{ event.starts_at_utc | localtime(event.timezone) }}（{{ timezone_label(event.timezone) }}）</dd>
+    </div>
+    <div><dt>时长</dt><dd>{{ event.duration_minutes }} 分钟</dd></div>
+    <div><dt>费用</dt><dd>{{ event.price_fen | fen }} / 席</dd></div>
+    <div>
+      <dt>席位</dt>
+      <dd>已报名 {{ counts.taken }} / {{ counts.capacity }}，剩余 {{ counts.available }} 席</dd>
+    </div>
+  </dl>
+  <p class="hint">付款成功后，会议链接会发送至你填写的邮箱。</p>
+</section>
+
+{% if not on_sale %}
+<section class="card state">
+  {% if not event.join_ready %}
+  {# Scheduled but not yet sellable — see `ConferenceEvent.is_on_sale`.  No "×"
+     mark here: nothing went wrong, the sale simply has not opened. #}
+  <h2>报名即将开放</h2>
+  <p>场次与时间已确定，报名通道即将开启，请稍后再来。</p>
+  {% elif counts.sold_out %}
+  <p class="state-mark dead" aria-hidden="true">×</p>
+  <h2>本场已售罄</h2>
+  <p>全部席位已报满。</p>
+  {% else %}
+  <p class="state-mark dead" aria-hidden="true">×</p>
+  <h2>本场已停止报名</h2>
+  <p>该场次会议已关闭报名。</p>
+  {% endif %}
+  <div class="actions">
+    <a class="btn btn-secondary" href="/conferences">查看其他会议</a>
+  </div>
+</section>
+{% else %}
+
+<form id="seat-form" data-conference-id="{{ event.id }}" novalidate>
+  <section class="card step">
+    <div class="step-head"><span class="step-num" aria-hidden="true">1</span><h2>填写联系信息</h2></div>
+
+    <div class="field">
+      <label for="name">姓名 <span class="req">必填</span></label>
+      <input id="name" name="customer_name" type="text" autocomplete="name" maxlength="200" required>
+    </div>
+
+    <div class="field">
+      <label for="email">邮箱 <span class="req">必填</span></label>
+      <input id="email" name="customer_email" type="email" autocomplete="email" maxlength="320" required>
+      <p class="hint">报名确认与会议链接将发送至该邮箱。</p>
+    </div>
+
+    <div class="field">
+      <label for="phone">手机号 <span class="opt">选填</span></label>
+      <input id="phone" name="customer_phone" type="tel" autocomplete="tel" maxlength="64">
+    </div>
+  </section>
+
+  <div class="actions">
+    <button type="submit" class="btn btn-primary" id="submit-btn">
+      锁定席位并前往支付 · {{ event.price_fen | fen }}
+    </button>
+    <p class="hint center">下一步会生成微信支付二维码，请在 {{ hold_minutes }} 分钟内完成支付。</p>
+    <p class="form-error" id="form-error" role="alert" hidden></p>
+  </div>
+</form>
+
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% raw %}
+<script>
+(function () {
+  var form = document.getElementById('seat-form');
+  if (!form) return;
+
+  var errorBox = document.getElementById('form-error');
+  var submitBtn = document.getElementById('submit-btn');
+  var idleLabel = submitBtn.textContent;
+
+  function showError(message) {
+    errorBox.textContent = message;
+    errorBox.hidden = false;
+  }
+
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    errorBox.hidden = true;
+    if (!form.reportValidity()) return;
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = '正在锁定席位…';
+
+    fetch('/api/conferences/' + encodeURIComponent(form.getAttribute('data-conference-id')) + '/seats', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        customer_name: document.getElementById('name').value.trim(),
+        customer_email: document.getElementById('email').value.trim(),
+        customer_phone: document.getElementById('phone').value.trim() || null
+      })
+    }).then(function (res) {
+      if (res.status === 201) {
+        return res.json().then(function (data) {
+          // The payment token stays server-side; the ticket page renders the QR.
+          window.location.assign('/ticket/' + encodeURIComponent(data.reference));
+        });
+      }
+      if (res.status === 409) { showError('本场席位刚刚报满，请查看其他会议。'); return; }
+      if (res.status === 422) { showError('本场已停止报名，请查看其他会议。'); return; }
+      if (res.status === 429) {
+        // Throttled (BUILD_PLAN §10).  Retrying at once makes it worse.
+        showError('提交过于频繁，请稍等片刻再试。如持续出现，请通过官网联系我们。');
+        return;
+      }
+      showError('创建订单失败，请稍后重试。');
+    }).catch(function () {
+      showError('网络异常，请检查网络后重试。');
+    }).then(function () {
+      submitBtn.disabled = false;
+      submitBtn.textContent = idleLabel;
+    });
+  });
+})();
+</script>
+{% endraw %}
+{% endblock %}

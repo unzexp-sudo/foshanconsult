@@ -1,16 +1,19 @@
 """Server-rendered pages — the payment surface (contract §11, owner M5).
 
-``/`` is the booking flow; ``/book/{reference}`` is the page a customer lands on
-to pay and to watch the booking confirm.  Both are Chinese-language, mobile-first,
-and render with **no outbound request**: the QR is drawn server-side and the
-stylesheet is served from ``app/static``.
+``/`` is the 1-1 booking flow and ``/book/{reference}`` is the page a customer
+lands on to pay for it.  ``/conferences``, ``/conference/{id}`` and
+``/ticket/{reference}`` are the ticketed-conference equivalents (contract §14.4).
+All are Chinese-language, mobile-first, and render with **no outbound request**:
+the QR is drawn server-side and the stylesheet is served from ``app/static``.
 
-Two invariants are load-bearing:
+Three invariants are load-bearing:
 
-* ``Booking.code_url`` is a payment token.  It is consumed by :func:`qr_svg` and
-  only the resulting SVG markup is rendered — never the token itself, and never
-  in a data attribute or in JavaScript.
-* Every timestamp is rendered in the *event type's* timezone.  The server's local
+* ``Booking.code_url`` and ``ConferenceSeat.code_url`` are payment tokens.  They
+  are consumed by :func:`qr_svg` and only the resulting SVG markup is rendered —
+  never the token itself, and never in a data attribute or in JavaScript.
+* ``ConferenceEvent.join_url`` is a *secret*, not a token: it is rendered only for
+  a **paid** seat.  A ticket page is reachable by anyone holding the reference.
+* Every timestamp is rendered in the *event's own* timezone.  The server's local
   zone is never used.
 
 Money is integer 分 everywhere in the app; :func:`format_fen` is the single place
@@ -34,6 +37,12 @@ from app.config import settings
 from app.db import get_db
 from app.models import BookingStatus, EventType
 from app.services.booking import get_booking
+from app.services.conference import (
+    get_event,
+    get_seat,
+    list_upcoming,
+    seat_counts,
+)
 
 router = APIRouter(tags=["pages"])
 
@@ -165,5 +174,135 @@ def booking_status_page(
             "qr_svg": svg,
             "expires_at_iso": expires_at.isoformat(),
             "remaining_seconds": remaining_seconds,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ticketed conferences — contract §14.4
+# ---------------------------------------------------------------------------
+#
+# Two things these pages must never do:
+#
+# * render `ConferenceEvent.join_url` unless the seat is **paid**.  The meeting
+#   link is the thing a ticket buys; showing it on a page reachable by URL would
+#   sell nothing.  `state == "paid"` is the only gate, and it is checked here, not
+#   in the template.
+# * show a seat count from anywhere other than `seat_counts`, so the figure a
+#   visitor reads is the figure the reservation path enforces.
+
+
+@router.get("/conferences", response_class=HTMLResponse, include_in_schema=False)
+def conferences_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    """Upcoming conferences, each with seats taken and seats remaining."""
+    rows = [
+        {
+            "event": event,
+            "counts": seat_counts(db, event),
+            "on_sale": event.is_on_sale(),
+        }
+        for event in list_upcoming(db)
+    ]
+    return templates.TemplateResponse(
+        request,
+        "conferences.html",
+        {"rows": rows, "default_timezone": settings.default_timezone},
+    )
+
+
+@router.get(
+    "/conference/{conference_id}",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def conference_page(
+    conference_id: str, request: Request, db: Session = Depends(get_db)
+) -> HTMLResponse:
+    """One conference and its sign-up form.
+
+    A cancelled or inactive event 404s rather than showing a dead page with a form
+    that cannot succeed — the reservation endpoint would refuse it anyway, and a
+    button that always fails is worse than no button.
+    """
+    event = get_event(db, conference_id)
+    if event is None or not event.active or event.is_cancelled:
+        return templates.TemplateResponse(
+            request, "not_found.html", {"reference": conference_id}, status_code=404
+        )
+
+    return templates.TemplateResponse(
+        request,
+        "conference.html",
+        {
+            "event": event,
+            "counts": seat_counts(db, event),
+            "on_sale": event.is_on_sale(),
+            "hold_minutes": settings.hold_minutes,
+        },
+    )
+
+
+@router.get("/ticket/{reference}", response_class=HTMLResponse, include_in_schema=False)
+def ticket_page(
+    reference: str, request: Request, db: Session = Depends(get_db)
+) -> HTMLResponse:
+    """Pay for a held seat, then read the join link once it is paid."""
+    seat = get_seat(db, reference.strip().upper())
+    if seat is None:
+        return templates.TemplateResponse(
+            request, "not_found.html", {"reference": reference}, status_code=404
+        )
+
+    event = get_event(db, seat.conference_event_id)
+    if event is None:
+        return templates.TemplateResponse(
+            request, "not_found.html", {"reference": reference}, status_code=404
+        )
+
+    now = datetime.now(UTC)
+
+    # `Seat.is_expired(now)` is the authority on a stale hold, exactly as
+    # `Booking.is_expired` is for a booking (contract §7.1).
+    if seat.status == BookingStatus.PAID:
+        state = "paid"
+    elif seat.status in (BookingStatus.EXPIRED, BookingStatus.CANCELLED) or seat.is_expired(
+        now
+    ):
+        state = "dead"
+    else:
+        state = "pending"
+
+    if event.is_cancelled:
+        # Every seat on a cancelled event is closed, so a paid one lands here too.
+        # Say what actually happened instead of blaming the payment clock.
+        dead_reason = "该场次已取消。如你已完成付款，我们会与你联系安排退款。"
+    else:
+        dead_reason = {
+            BookingStatus.CANCELLED: "该座位已取消。",
+            BookingStatus.EXPIRED: "支付超时，座位已释放。",
+        }.get(seat.status, "支付超时，座位已释放。")
+
+    # The QR exists only for a live, unexpired hold — and only as markup.
+    svg: str | None = None
+    if state == "pending" and seat.code_url:
+        svg = qr_svg(seat.code_url)
+
+    expires_at = aware_utc(seat.expires_at)
+    remaining_seconds = max(0, int((expires_at - now).total_seconds()))
+
+    return templates.TemplateResponse(
+        request,
+        "ticket.html",
+        {
+            "seat": seat,
+            "event": event,
+            "state": state,
+            "dead_reason": dead_reason,
+            "qr_svg": svg,
+            "expires_at_iso": expires_at.isoformat(),
+            "remaining_seconds": remaining_seconds,
+            # Revealed only for a paid seat — the gate for the whole page.
+            "join_url": event.join_url if state == "paid" else None,
+            "join_note": event.join_note if state == "paid" else None,
         },
     )

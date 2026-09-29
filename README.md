@@ -1,15 +1,22 @@
 # zhituoyuan booking service
 
-A paid 1-1 booking service for `www.zhituoyuan.com`: a visitor picks a slot from the
-owner's Google Calendar, pays ¥500 with WeChat Pay (Native / 扫码), and the booking
-becomes real **only after WeChat's signed callback verifies the money arrived**. It is
-two deployables — a FastAPI booking app and a small calendar relay — that share one
+A paid booking service for `www.zhituoyuan.com`, carrying **two products** on one
+service and one schema:
+
+- **1-1 consultations** — a visitor picks a slot from the owner's Google Calendar, pays
+  ¥500 with WeChat Pay (Native / 扫码), and the booking becomes real **only after WeChat's
+  signed callback verifies the money arrived**.
+- **Ticketed conferences** — the owner schedules a call from the backend (up to 100 seats,
+  ¥50 each), buyers pay with WeChat, and a verified payment emails them the join link. The
+  public list shows seats taken and seats remaining.
+
+It is two deployables — a FastAPI booking app and a small calendar relay — that share one
 repository, one SQLAlchemy schema and one test suite. The booking app never holds a
 Google credential in production; the relay is the only thing that talks to Google.
 
 Read `docs/MODULE_CONTRACT.md` for the frozen interfaces and `docs/BUILD_PLAN.md` for the
-phases, security checklist and the decisions D1–D5 (summarised in
-[Decisions](#decisions-d1d5) below).
+phases, security checklist and the decisions D1–D6 (summarised in
+[Decisions](#decisions-d1d6) below).
 
 ---
 
@@ -136,6 +143,66 @@ Both are fine for abuse control; neither is a billing primitive. See `app/rate_l
 | `GOOGLE_CLIENT_SECRET` | yes | `""` | Same OAuth client. |
 | `GOOGLE_REFRESH_TOKEN` | yes | `""` | One-time consent, `access_type=offline`, scope `https://www.googleapis.com/auth/calendar`. |
 | `GOOGLE_CALENDAR_ID` | no | `primary` | The owner's calendar ID, or `primary`. |
+
+---
+
+## Ticketed conferences
+
+The owner schedules a call from the backend, buyers pay ¥50 a seat with WeChat, and a
+verified payment emails them the join link. Everything below needs
+`X-Admin-Token: $SECRET_KEY` (the same shared secret as `GET /api/admin/bookings`).
+
+**Schedule one.** `starts_at` is ISO-8601 **with an offset**; it is stored as UTC.
+
+```bash
+curl -sS -X POST "$PUBLIC_BASE_URL/api/admin/conferences" \
+  -H "X-Admin-Token: $SECRET_KEY" -H 'Content-Type: application/json' \
+  -d '{"title":"出海获客公开课","starts_at":"2026-10-08T20:00:00+08:00",
+       "duration_minutes":60,"price_fen":5000,"capacity":100,
+       "join_url":"https://voovmeeting.com/dm/XXXXXXXX"}'
+```
+
+The response is `{"conference": {...}, "clashing_bookings": [...]}`. `clashing_bookings`
+lists live 1-1 bookings that overlap — a **warning, not a refusal**: the conference is the
+commitment that cannot move once seats are sold, so the 1-1 is the one to reschedule.
+
+**`join_url` is what puts an event on sale.** An event with no link is created, listed and
+counted, but cannot be sold — the meeting link *is* the product, and a customer who pays for
+a ticket that cannot tell them where to go is a refund and an apology. Paste the link with
+`PATCH /api/admin/conferences/{id}` and the event opens for sale at that moment. The public
+list shows "即将开放" while it is waiting.
+
+| What the owner does | Call |
+|---|---|
+| List every event, cancelled and past included, with counts | `GET /api/admin/conferences` |
+| Reschedule / re-price / edit the link / change capacity | `PATCH /api/admin/conferences/{id}` |
+| See who is coming | `GET /api/admin/conferences/{id}/seats` |
+| Cancel | `POST /api/admin/conferences/{id}/cancel` |
+
+`PATCH` only touches the fields it names. Capacity cannot be lowered below the number of
+seats already held or paid — that would leave attendees outside the event's own definition
+of itself, and nothing downstream could repair it.
+
+`POST .../cancel` returns `paid_seats_needing_refund`. **v1 issues no automatic refunds**, so
+that list *is* the follow-up work: those people are owed a refund or a replacement, and this
+is the only place they are named.
+
+**What a buyer sees.** `/conferences` lists upcoming calls with seats taken and remaining
+(from the same counter the write path enforces, so the page cannot advertise a seat the API
+then refuses). `/conference/{id}` is the sign-up form; `/ticket/{reference}` is where they
+pay, and where the join link appears **once the payment verifies**. The link is a secret: it
+is in the ticket email, on no endpoint reachable before payment, and `GET /api/conferences`
+does not carry the field at all.
+
+Two operational notes:
+
+- **A conference blocks 1-1 time.** `GET /api/slots` hides the slots it covers and
+  `POST /api/bookings` refuses them with `422`. Taking an event off sale (`active: false`)
+  does **not** stop the blocking — only cancelling it does, because an event off sale is
+  still a meeting the owner is holding.
+- **The join link reaches buyers by email.** `EMAIL_BACKEND=console` (the default) prints it
+  to the service log instead of sending it. Set `EMAIL_BACKEND=smtp` before selling a real
+  seat, or nobody receives their link.
 
 ---
 
@@ -281,7 +348,7 @@ key, which is gone: the env var tables above are the single source of truth for 
 > the booking image does **not** depend on `railway.json` to be built — the plain
 > `Dockerfile` name is the non-deprecated path. Plan the migration before the cutoff.
 
-### Decisions (D1–D5)
+### Decisions (D1–D6)
 
 - **D1 — where the payment step lives:** hybrid. The slot picker stays at
   `www.zhituoyuan.com/book`; on "pay" the browser is sent to `pay.zhituoyuan.com/pay/{reference}`
@@ -296,6 +363,13 @@ key, which is gone: the env var tables above are the single source of truth for 
 - **D4 — pricing and slots:** ¥500 / 30 minutes, Mon–Fri 09:00–18:00 Asia/Shanghai, 4-hour
   minimum notice, 60-day window. This is exactly what `app/seed.py` writes.
 - **D5 — the paid consult sits beside the free `/contact` form**, not in place of it.
+- **D6 — conferences are ticketed separately from 1-1s:** up to 100 seats at ¥50, one seat
+  per purchase, hosted on **VooV Meeting** with the join link pasted by the owner rather
+  than created through an API. v1's no-refund policy carries over, so cancelling an event
+  that already has paid seats returns a list of references for manual refund. **A 1-1
+  cannot be booked during a conference.** These are new tables (`conference_events`,
+  `conference_seats`), not a `capacity` column on `event_types` — `bookings.uq_active_slot`
+  permits exactly one live booking per start, so a 100-seat event cannot live there at all.
 
 ---
 
@@ -373,11 +447,16 @@ code, and none of them are done by deploying this repository.**
 ## Known limitations / not in v1 (BUILD_PLAN §13)
 
 - **No refunds.** There is no refund path at all, including for the late-payment edge case
-  described in the report. Out of scope for v1.
+  described in the report, and for a conference cancelled after seats were sold. Out of scope
+  for v1. The cancel endpoint returns `paid_seats_needing_refund` so the follow-up is at
+  least a visible list rather than a silent loss.
 - **No 发票 / invoicing, no coupons.**
 - **No multi-staff round-robin** — one calendar, one owner.
 - **No mini-program** (Native / 扫码 only).
-- **No admin CRUD UI** — `GET /api/admin/bookings` is read-only.
+- **No admin HTML UI.** `GET /api/admin/bookings` is read-only, and the conference admin
+  surface is JSON only (`/api/admin/conferences*`) — scheduling is done with `curl` or from
+  whatever the operator already uses. There is no dashboard, and no web form for creating an
+  event.
 - **No i18n** — the pages are Chinese.
 - **No Stripe** and no other payment provider.
 - **No recurring availability exceptions** — the weekly `AvailabilityRule` grid only; time

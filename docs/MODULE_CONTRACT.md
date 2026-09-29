@@ -364,6 +364,32 @@ call synchronously.
 | GET | `/healthz` | `{"ok": true}` |
 | GET | `/api/admin/bookings` | Read-only list, requires `X-Admin-Token: settings.secret_key` |
 
+Ticketed conferences — §14.5. Same token for every `/api/admin/*` row.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/conferences` | Conference list (HTML), with seats taken / remaining |
+| GET | `/conference/{conference_id}` | Sign-up page (HTML). 404s when cancelled or inactive |
+| GET | `/ticket/{reference}` | Pay, then read the join link (HTML) |
+| GET | `/api/conferences` | Upcoming events + seat counts. **Never carries `join_url`** |
+| POST | `/api/conferences/{conference_id}/seats` | Hold a seat + WeChat order. `201` / `404` unknown / `409` sold out / `422` not on sale |
+| GET | `/api/seats/{reference}` | Ticket status. `join_url` and `join_note` are `null` until `paid` |
+| POST | `/api/seats/{reference}/cancel` | Give up a pending hold; frees the seat number |
+| GET | `/api/admin/conferences` | Every event, cancelled and past included |
+| POST | `/api/admin/conferences` | Schedule one. Returns `clashing_bookings` |
+| PATCH | `/api/admin/conferences/{conference_id}` | Reschedule / re-price / edit the link / change capacity |
+| POST | `/api/admin/conferences/{conference_id}/cancel` | Cancel; returns `paid_seats_needing_refund` |
+| GET | `/api/admin/conferences/{conference_id}/seats` | Attendee list, by seat number |
+
+`POST /api/conferences/{id}/seats` body:
+`{"customer_name","customer_email","customer_phone?"}` — **no amount field**, ever. The
+price is snapshotted from the event row.
+
+**The join link is a secret.** `join_url` is delivered in the ticket email after a
+verified payment and appears on no response reachable before one. That rule is enforced
+in the routers, not in the templates: `GET /api/seats/{reference}` and `/ticket/{reference}`
+both gate it on `status == "paid"`.
+
 `POST /api/bookings` body:
 `{"event_type_id","slot_start","customer_name","customer_email","customer_phone?","customer_note?"}`
 `slot_start` is ISO-8601 **with offset**. Reject `422` if the slot is not on the grid, is
@@ -535,26 +561,104 @@ via `app.db.session_scope()` and each is safe to call inline from `BackgroundTas
 ```python
 def release_expired_holds() -> int
 def finalize_paid_booking(booking_id: str) -> None
+def finalize_ticket(seat_id: str) -> None
 def release_booking_hold(booking_id: str) -> None
 ```
 
-`app/routers/payments.py` (M2) dispatches `finalize_paid_booking` after responding; it
-imports the function **inside** the handler so the notify endpoint still works if
-`app/tasks.py` is missing.
+`app/routers/payments.py` (M2) dispatches `finalize_paid_booking` or `finalize_ticket`
+after responding; it imports the function **inside** the handler so the notify endpoint
+still works if `app/tasks.py` is missing. `finalize_ticket` is idempotent on
+`ConferenceSeat.ticket_sent_at` — a replayed notify must not email the join link twice.
 
 ## 14.4 Cross-module imports — the allowed set
 
 | From | May import |
 |---|---|
-| M1 (`services/booking.py`, `routers/booking.py`, `routers/admin.py`) | `app.services.availability`, `app.models`, `app.schemas`, `app.deps` (routers only) |
-| M2 (`routers/payments.py`, `adapters/payments_*`) | `app.services.booking.mark_paid`, `app.models`, `app.schemas` |
+| M1 (`services/booking.py`, `routers/booking.py`, `routers/admin.py`) | `app.services.availability`, `app.services.conference`, `app.models`, `app.schemas`, `app.deps` (routers only) |
+| M2 (`routers/payments.py`, `adapters/payments_*`) | `app.services.booking.mark_paid`, `app.services.conference`, `app.models`, `app.schemas` |
 | M3 (`relay/**`) | nothing from `app.*` — the relay is a standalone deployable |
 | M4 (`adapters/calendar_*`) | `app.ports.calendar` only |
-| M5 (`routers/pages.py`, `templates/`, `static/`) | `app.services.booking.get_booking`, `app.services.availability` |
-| M6 (`tasks.py`, `services/sweeper.py`, `adapters/email_*`) | `app.services.booking`, `app.adapters.*` via `app.deps` |
+| M5 (`routers/pages.py`, `templates/`, `static/`) | `app.services.booking.get_booking`, `app.services.availability`, `app.services.conference` |
+| M6 (`tasks.py`, `services/sweeper.py`, `adapters/email_*`) | `app.services.booking`, `app.services.conference`, `app.adapters.*` via `app.deps` |
+| Conferences (`services/conference.py`, `routers/conferences.py`) | `app.services.availability.conference_intervals`, `app.models`, `app.schemas`, `app.deps` (routers only) |
 
 Anything not in this table needs an integrator decision. Import lazily inside the
 function body where a sibling might still be unwritten.
+
+## 14.5 `app/services/conference.py` — ticketed conferences
+
+Added 2026-09-29. Conferences get their own tables, their own service and their own
+capacity guard rather than a `capacity` column on `EventType`, because the difference is
+structural: `Booking.uq_active_slot` is `UNIQUE(event_type_id, slot_start)` over live
+rows, which permits exactly **one** live booking per start — a 100-seat event cannot be
+represented in that table at all.
+
+```python
+# errors
+class ConferenceError(Exception)
+class ConferenceNotFound(ConferenceError)
+class SeatsClosed(ConferenceError)      # cancelled / inactive / already started / no join link
+class SoldOut(ConferenceError)          # every seat taken, counting unexpired holds
+class SeatNotFound(ConferenceError)
+class SeatNotBookable(ConferenceError)
+class SeatNotCancellable(ConferenceError)
+class CapacityBelowSeats(ConferenceError)
+
+@dataclass(frozen=True)
+class SeatCounts:                       # capacity, taken, paid
+    available: int                      # property
+    sold_out: bool                      # property
+
+# counting — one primitive, used by both display and allocation
+def seat_counts(db, event, *, now=None) -> SeatCounts
+def expire_stale_seats(db, *, conference_event_id=None, seat_no=None, now=None) -> int
+
+# reading
+def get_event(db, conference_id) -> ConferenceEvent | None
+def get_seat(db, reference) -> ConferenceSeat | None
+def list_upcoming(db, *, now=None, include_past=False) -> list[ConferenceEvent]
+def list_all(db) -> list[ConferenceEvent]
+def seats_for(db, event, *, paid_only=False) -> list[ConferenceSeat]
+def clashing_bookings(db, event, *, now=None) -> list[str]
+
+# managing (admin)
+def create_event(db, *, title, starts_at, description="", duration_minutes=60,
+                 timezone=..., price_fen=5000, capacity=100,
+                 join_url="", join_note="", active=True) -> ConferenceEvent
+def update_event(db, event, **fields) -> ConferenceEvent
+def cancel_event(db, event, *, now=None) -> list[str]   # returns PAID refs needing a refund
+
+# selling
+def reserve_seat(db, *, conference_event_id, customer_name, customer_email,
+                 payments, customer_phone=None, now=None) -> ConferenceSeat
+def cancel_seat(db, reference, *, now=None) -> ConferenceSeat
+def mark_seat_paid(db, seat, *, transaction_id, paid_at=None) -> ConferenceSeat
+def honour_late_seat_payment(db, seat, *, transaction_id, paid_at=None, now=None) -> ConferenceSeat
+```
+
+Three properties the implementation depends on:
+
+1. **Capacity is a database invariant.** `ConferenceSeat.uq_live_seat` is a partial
+   unique index on `(conference_event_id, seat_no)` over live rows. `reserve_seat`
+   allocates the lowest free number in `1..capacity` inside a `begin_nested()` savepoint
+   and retries on `IntegrityError`, so two simultaneous payments cannot produce the 101st
+   seat — the index refuses the insert, not a `SELECT COUNT(*)` both requests read.
+2. **The index predicate is on `status`, not `expires_at`.** A hold that has run out is
+   logically dead but still physically `pending_payment`, so it still occupies its number.
+   The transactional pre-insert sweep is what frees a number; correctness must not depend
+   on the sweeper running (same rule as §7).
+3. **Display and enforcement share `_taken_seat_numbers`.** `seat_counts` and
+   `reserve_seat` read the same set, so a page cannot advertise a seat the write path
+   refuses.
+
+`ConferenceEvent.is_on_sale()` requires a non-empty `join_url`. The meeting link *is* the
+product, so an event whose link does not exist yet is scheduled but not sellable — the
+owner pastes the link and it opens at that moment.
+
+A conference also blocks 1-1 time, both directions: `conference_intervals` feeds
+`generate_slots` (hides) and `create_booking` (refuses, `422`). `active=False` alone does
+**not** stop the blocking — only `cancel_event`, which sets `cancelled_at` too.
+
 
 # 15. Addenda to the frozen contract (integrator)
 
@@ -733,3 +837,78 @@ deliberate change to a frozen shape; the reasoning matters more than the diff.
 - **Repo gap noticed while doing this:** there is no `.github/` directory, so nothing runs the
   suite on push. Every "tests pass" claim in these addenda is a local run.
 
+
+### Integrator addenda, sixth pass (2026-09-29, ticketed conferences)
+
+The owner asked for a second product on the same service: *"conference calls, where up to
+100 members can join — so it is a ticketed event. Maximum 100, and they pay directly with
+Wechat — cost per seat is 50 Yuan — as soon as they pay, they get confirmation email saying
+their seat is reserved and get a link to the conference call with date and time. We will be
+doing multiple conference calls per week on different topics and each call will be 1hr.
+Will arrange time and date later as we go, but I should be able to do it from our backend.
+It should also show how many people have booked so far / how many seats available."*
+
+Decisions taken with the owner before building: the meeting is hosted on **VooV Meeting**
+(`voovmeeting.com`) and the link is **pasted by the owner**, not created by an API call;
+**one seat per purchase**; **v1's no-refund policy carries over** (a manual refund flag);
+and **no 1-1 during a conference**.
+
+- **Conferences are new tables, not a `capacity` column on `EventType`.** The reason is
+  structural and worth recording: `Booking.uq_active_slot` is
+  `UNIQUE(event_type_id, slot_start)` over live rows, which permits exactly one live booking
+  per start. A 100-seat event cannot be represented in `bookings` at all. `ConferenceEvent`
+  and `ConferenceSeat` therefore carry their own guard, `uq_live_seat`, the same shape
+  generalised from one occupant per slot to `capacity` occupants.
+- **Capacity is a database invariant.** `reserve_seat` allocates the lowest free seat number
+  and retries on `IntegrityError` inside a `begin_nested()` savepoint, so losing the race for
+  a number costs only that INSERT — not the caller's transaction, sweep included.
+- **The partial index keys on `status`, not `expires_at`.** A hold that has run out is
+  logically dead (§7's lazy expiry) but still physically `pending_payment`, so it still
+  occupies its number. The transactional pre-insert sweep is what frees it, and correctness
+  must not depend on the sweeper.
+- **Display and enforcement share one primitive.** `seat_counts` and `reserve_seat` both read
+  `_taken_seat_numbers`, so "剩余 N 席" on the page and the `SoldOut` in the write path cannot
+  drift. This is the defect class of the fifth pass, applied pre-emptively.
+- **The join link is a secret.** It is delivered only in the ticket email, after a verified
+  payment, and appears on no page or endpoint reachable before one — the gate is
+  `status == "paid"` in the routers, not in the template, because a template is the kind of
+  file someone edits without reading the rule. `GET /api/conferences` does not carry the
+  field at all. The ticket page reloads on transition to paid rather than patching the DOM,
+  so client JavaScript never holds the URL.
+- **`is_on_sale()` requires a non-empty `join_url`.** The meeting link *is* the product:
+  selling a seat to an event whose link does not exist yet means a customer pays and receives
+  a ticket that cannot tell them where to go — a refund and an apology, not something fixable
+  afterwards. The public list distinguishes "即将开放" from "已停止报名" via a separate
+  `join_ready` flag, because those are different messages to a visitor.
+- **The notify handler now routes across two tables.** It previously looked an
+  `out_trade_no` up in `bookings` only, so a `TK…` ticket payment was "unknown order" and the
+  money went nowhere. References are self-describing by prefix (`BK…` / `TK…`), so the common
+  path is one indexed lookup; the fallback probe exists because a prefix is a convention, not
+  a constraint, and dropping a real payment is the worst available outcome. The replay guard,
+  amount check and audit row are shared — only the settle call and the post-payment task
+  branch — so neither kind of order can end up without them.
+- **The 1-1 conflict is enforced in both directions**, per the owner's decision.
+  `conference_intervals` feeds `generate_slots` (hides the slots) and `create_booking`
+  (refuses with `422`), mirroring how calendar busy time is handled. `active=False` alone does
+  **not** stop the blocking: an event off sale but not cancelled is still a meeting the owner
+  is holding, and blocking a slot that turns out to be free is visible and fixable whereas a
+  1-1 booked during a conference is not. Scheduling *over* an existing live 1-1 is **reported**
+  (`clashing_bookings`) rather than refused, because the conference is the commitment that
+  cannot move once seats are sold.
+- **`finalize_ticket` has no calendar step**, unlike `finalize_paid_booking`. The conference
+  is one event the owner created in their own meeting platform, not a hold we placed, so
+  there is nothing to confirm and nothing to release. It is idempotent on
+  `ConferenceSeat.ticket_sent_at` — a replayed notify that emailed twice would hand out a
+  second copy of a secret — and it logs an error when a *paid* seat's event has no
+  `join_url`, because that is a work item for a human.
+- **New tests:** 27 in `tests/test_conferences.py`, covering the lowest-free-seat allocation,
+  the seat after the last one, the `seat_counts` / `reserve_seat` parity contract, an expired
+  hold freeing its number, the price snapshot, an event with no link being unsellable, the
+  notify route for a `TK…` order, replay, amount mismatch, cancellation, the join link being
+  absent before payment and present after (on both the API and the page), the grid and the
+  write path both refusing a conference overlap, the clash report, admin auth, the
+  capacity-decrease guard, and the unknown-field guard. Suite total: **220 passing**.
+- **Consequence for the seed:** `app/seed.py` now also creates a sample conference at 20:00
+  Shanghai a week out, **with no `join_url`** — so it is visible as "即将开放" but cannot take
+  money. A seed row that a real visitor could buy would be a trap, and a placeholder URL would
+  be worse: it would be emailed.

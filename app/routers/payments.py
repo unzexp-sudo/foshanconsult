@@ -3,7 +3,14 @@
 There is no auth header: authenticity *is* the signature, so the raw body is read
 once and handed to the gateway unmodified.  The handler owns the transaction
 because :func:`app.services.booking.mark_paid` deliberately only flushes — the
-booking transition and the ``PaymentEvent`` audit row must land atomically.
+order transition and the ``PaymentEvent`` audit row must land atomically.
+
+**One callback, two kinds of order.**  A 1-1 booking (``BK…``) and a conference
+ticket (``TK…``) are separate tables with separate services, but WeChat knows only
+about an ``out_trade_no``.  Everything that does not depend on which one it is —
+the replay guard, the amount check, the audit row — lives once, in
+:func:`_handle_notification`; only the settle call and the post-payment task
+branch.  Duplicating the guard would be how one of the two ends up without it.
 
 WeChat retries a callback up to 15 times, so every failure path answers 2xx
 (except a forged signature, which is not a payment event at all) and does the
@@ -23,15 +30,20 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps import get_payment_gateway
-from app.models import Booking, BookingStatus, PaymentEvent
+from app.models import Booking, BookingStatus, ConferenceSeat, PaymentEvent
 from app.ports.payments import PaymentGateway, PaymentSignatureError
 from app.services.booking import PaymentConflict, honour_late_payment
+from app.services.conference import honour_late_seat_payment
 
 logger = logging.getLogger("booking")
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])
 
 NOTIFY_PATH = "/api/payments/wechat/notify"
+
+#: Conference tickets carry this prefix so a reference is self-describing — see
+#: :func:`app.models.new_ticket_reference`.
+SEAT_REFERENCE_PREFIX = "TK"
 
 
 def _ack(code: str, message: str, *, status_code: int = 200) -> JSONResponse:
@@ -85,26 +97,83 @@ def _record(
     return True
 
 
-def _dispatch_finalize(booking_id: str) -> None:
-    """Run the post-payment work (calendar confirm + email) off the request path.
+def _find_order(db: Session, out_trade_no: str) -> Booking | ConferenceSeat | None:
+    """The row a WeChat ``out_trade_no`` belongs to, or ``None``.
+
+    References are self-describing by prefix, so the common path is one indexed
+    lookup rather than a probe of both tables.  The fallback lookups exist because
+    a prefix is a *convention*, not a database constraint: if a row were ever
+    created with the other prefix, treating its payment as an unknown order would
+    drop real money on the floor.  Cheap insurance on a path that runs once per
+    payment.
+    """
+    if out_trade_no.startswith(SEAT_REFERENCE_PREFIX):
+        seat = db.scalar(
+            select(ConferenceSeat).where(ConferenceSeat.out_trade_no == out_trade_no)
+        )
+        if seat is not None:
+            return seat
+
+    booking = db.scalar(select(Booking).where(Booking.out_trade_no == out_trade_no))
+    if booking is not None:
+        return booking
+
+    return db.scalar(
+        select(ConferenceSeat).where(ConferenceSeat.out_trade_no == out_trade_no)
+    )
+
+
+def _settle(db: Session, order: Booking | ConferenceSeat, notification) -> None:
+    """Settle a verified payment onto whichever kind of order it belongs to.
+
+    Both services take the same arguments and both refuse rather than silently drop
+    money, but they differ in what "the thing is gone" means: a conference has one
+    extra way to fail, because the *whole event* can be cancelled after the seat was
+    held.  Both raise the same :class:`~app.services.booking.PaymentConflict`, which
+    is what lets the caller treat them identically.
+    """
+    paid_at = _coerce_datetime(notification.success_time)
+    if isinstance(order, ConferenceSeat):
+        honour_late_seat_payment(
+            db, order, transaction_id=notification.transaction_id, paid_at=paid_at
+        )
+        return
+    honour_late_payment(
+        db, order, transaction_id=notification.transaction_id, paid_at=paid_at
+    )
+
+
+def _dispatch_finalize(order_id: str, *, is_seat: bool) -> None:
+    """Run the post-payment work (calendar confirm + email, or the ticket) off the
+    request path.
+
+    Only the id and which table it lives in cross into the background task — never
+    the ORM row.  The request's session is closed by the time this runs, so a
+    detached object would raise on its first attribute access, and the failure
+    would be invisible because nothing is waiting on the result.
 
     Imported lazily so the notify endpoint keeps working while ``app.tasks`` is
     still being written, and guarded so a failure here can never turn a
     successful payment into a failed response.
     """
+    task_name = "finalize_ticket" if is_seat else "finalize_paid_booking"
     try:
-        from app.tasks import finalize_paid_booking
-    except Exception:  # noqa: BLE001 - the booking is paid regardless
+        if is_seat:
+            from app.tasks import finalize_ticket as finalize
+        else:
+            from app.tasks import finalize_paid_booking as finalize
+    except Exception:  # noqa: BLE001 - the payment is settled regardless
         logger.exception(
-            "wechat notify: finalize_paid_booking unavailable; booking %s is paid "
-            "but calendar/email were not dispatched",
-            booking_id,
+            "wechat notify: %s unavailable; order %s is paid but its email was not "
+            "dispatched",
+            task_name,
+            order_id,
         )
         return
     try:
-        finalize_paid_booking(booking_id)
+        finalize(order_id)
     except Exception:  # noqa: BLE001 - never mask a completed payment
-        logger.exception("wechat notify: finalize_paid_booking failed for %s", booking_id)
+        logger.exception("wechat notify: %s failed for %s", task_name, order_id)
 
 
 def _handle_notification(
@@ -114,10 +183,8 @@ def _handle_notification(
     raw_text: str,
     background_tasks: BackgroundTasks,
 ) -> JSONResponse:
-    booking = db.scalar(
-        select(Booking).where(Booking.out_trade_no == notification.out_trade_no)
-    )
-    if booking is None:
+    order = _find_order(db, notification.out_trade_no)
+    if order is None:
         logger.error(
             "wechat notify: unknown out_trade_no %s (transaction %s) — answering and stopping",
             notification.out_trade_no,
@@ -132,6 +199,9 @@ def _handle_notification(
             outcome="unknown_order",
         )
         return _ack("FAIL", "unknown order")
+
+    is_seat = isinstance(order, ConferenceSeat)
+    kind = "seat" if is_seat else "booking"
 
     # Replay guard: transaction_id is unique and WeChat resends up to 15 times.
     existing = db.scalar(
@@ -167,15 +237,16 @@ def _handle_notification(
         )
         return _ack("SUCCESS", "成功")
 
-    if notification.amount_fen != booking.amount_fen:
+    if notification.amount_fen != order.amount_fen:
         event.outcome = "amount_mismatch"
         db.commit()
         logger.error(
             "wechat notify: AMOUNT MISMATCH for %s — expected %d fen, got %d fen; "
-            "booking left pending_payment",
-            booking.reference,
-            booking.amount_fen,
+            "%s left pending_payment",
+            order.reference,
+            order.amount_fen,
             notification.amount_fen,
+            kind,
         )
         return _ack("FAIL", "amount mismatch")
 
@@ -183,57 +254,57 @@ def _handle_notification(
         event.outcome = f"trade_state={notification.trade_state}"
         db.commit()
         logger.error(
-            "wechat notify: trade_state %s for %s is not SUCCESS; booking left pending_payment",
+            "wechat notify: trade_state %s for %s is not SUCCESS; %s left pending_payment",
             notification.trade_state,
-            booking.reference,
+            order.reference,
+            kind,
         )
         return _ack("FAIL", "trade state not success")
 
-    # Settle the payment.  `honour_late_payment` also handles the case where the
+    # Settle the payment.  The honour_* services also handle the case where the
     # hold expired or was cancelled before the callback landed: a verified payment
     # must never be silently dropped.
     try:
-        honour_late_payment(
-            db,
-            booking,
-            transaction_id=notification.transaction_id,
-            paid_at=_coerce_datetime(notification.success_time),
-        )
+        _settle(db, order, notification)
     except PaymentConflict as conflict:
         event.outcome = "paid_conflict"
         db.commit()
         logger.error(
-            "wechat notify: CONFLICT for %s — %s. The money is real and the slot is "
+            "wechat notify: CONFLICT for %s — %s. The money is real and the %s is "
             "gone; a refund is required. Answering FAIL so this is never recorded as "
             "a success.",
-            booking.reference,
+            order.reference,
             conflict,
+            "seat" if is_seat else "slot",
         )
-        return _ack("FAIL", "booking no longer holds this slot; refund required")
+        return _ack("FAIL", "order no longer holds this slot; refund required")
 
-    # SUCCESS must imply the booking really is paid.  If this ever fires, the
+    # SUCCESS must imply the order really is paid.  If this ever fires, the
     # handler and the service have drifted apart and WeChat was about to be told a
     # lie — which is how a paid customer ends up with no booking and no signal.
-    if booking.status is not BookingStatus.PAID:
+    if order.status is not BookingStatus.PAID:
         event.outcome = "not_paid"
         db.commit()
         logger.error(
-            "wechat notify: booking %s is %s after settlement — refusing to ack SUCCESS",
-            booking.reference,
-            booking.status.value,
+            "wechat notify: %s %s is %s after settlement — refusing to ack SUCCESS",
+            kind,
+            order.reference,
+            order.status.value,
         )
-        return _ack("FAIL", "booking not marked paid")
+        return _ack("FAIL", "order not marked paid")
 
     event.outcome = "paid"
     db.commit()
     logger.info(
-        "wechat notify: booking %s paid (transaction %s)",
-        booking.reference,
+        "wechat notify: %s %s paid (transaction %s)",
+        kind,
+        order.reference,
         notification.transaction_id,
     )
 
-    # Calendar confirm + email can exceed WeChat's 5 s budget — never inline.
-    background_tasks.add_task(_dispatch_finalize, booking.id)
+    # Calendar confirm + email (or the ticket) can exceed WeChat's 5 s budget —
+    # never inline.
+    background_tasks.add_task(_dispatch_finalize, order.id, is_seat=is_seat)
     return _ack("SUCCESS", "成功")
 
 

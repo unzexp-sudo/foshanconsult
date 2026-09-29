@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}付费会议 · 知托源{% endblock %}
+
+{% block content %}
+<header class="page-head">
+  <p class="eyebrow">付费会议</p>
+  <h1>近期会议</h1>
+  <p class="lede">每场限 100 席，微信支付。付款成功后，会议链接将发送至你的邮箱。</p>
+</header>
+
+{% if not rows %}
+<section class="card">
+  <h2>暂无会议安排</h2>
+  <p class="muted">新的会议正在筹备中，请稍后再来查看，或先预约 1-1 咨询。</p>
+  <div class="actions">
+    <a class="btn btn-secondary" href="/">预约 1-1 咨询</a>
+  </div>
+</section>
+{% else %}
+
+<ul class="conf-list">
+  {% for row in rows %}
+  <li class="card conf-card">
+    <div class="conf-head">
+      <h2 class="conf-title">{{ row.event.title }}</h2>
+      {% if row.counts.sold_out %}
+      <span class="badge badge-off">已售罄</span>
+      {% elif not row.join_ready %}
+      <span class="badge badge-soon">即将开放</span>
+      {% elif not row.on_sale %}
+      <span class="badge badge-off">已停止报名</span>
+      {% else %}
+      <span class="badge badge-ok">报名中</span>
+      {% endif %}
+    </div>
+
+    <p class="conf-when">
+      {{ row.event.starts_at_utc | localtime(row.event.timezone) }} ·
+      {{ row.event.duration_minutes }} 分钟（{{ timezone_label(row.event.timezone) }}）
+    </p>
+
+    {% if row.event.description %}
+    <p class="muted">{{ row.event.description }}</p>
+    {% endif %}
+
+    {# Both figures come from `seat_counts` — the same call the reservation path
+       enforces against, so this can never advertise a seat the API then refuses. #}
+    <div class="conf-counts">
+      <span>已报名 <strong>{{ row.counts.taken }}</strong> / {{ row.counts.capacity }}</span>
+      <span>剩余 <strong>{{ row.counts.available }}</strong> 席</span>
+    </div>
+    <div class="conf-meter"
+         role="img"
+         aria-label="已报名 {{ row.counts.taken }} 席，共 {{ row.counts.capacity }} 席">
+      <span class="conf-meter-fill"
+            style="width: {{ (row.counts.taken * 100 // row.counts.capacity) if row.counts.capacity else 0 }}%"></span>
+    </div>
+
+    <p class="conf-price">{{ row.event.price_fen | fen }} / 席</p>
+
+    <div class="actions">
+      {% if row.on_sale and not row.counts.sold_out %}
+      <a class="btn btn-primary" href="/conference/{{ row.event.id }}">立即报名</a>
+      {% else %}
+      <button type="button" class="btn btn-secondary" disabled>暂不可报名</button>
+      {% endif %}
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+
+{% endif %}
+{% endblock %}

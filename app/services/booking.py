@@ -25,7 +25,11 @@ from app.db import utcnow
 from app.models import Booking, BookingStatus, EventType, new_reference
 from app.ports.calendar import CalendarGateway
 from app.ports.payments import ChargeRequest, PaymentGateway
-from app.services.availability import is_slot_on_grid, owned_intervals
+from app.services.availability import (
+    conference_intervals,
+    is_slot_on_grid,
+    owned_intervals,
+)
 
 logger = logging.getLogger("booking")
 
@@ -224,6 +228,18 @@ def create_booking(
         if busy_start < slot_end and busy_end > start:
             raise SlotNotBookable(
                 f"slot {start.isoformat()} overlaps existing calendar commitments"
+            )
+
+    # 3c. a ticketed conference is the owner's own time, so a 1-1 call cannot
+    # happen during one — the same rule `generate_slots` applies.  Neither of the
+    # checks above can see it: `is_slot_on_grid` consults neither the DB nor the
+    # calendar, and the partial unique index only guards *our own bookings of this
+    # event type*.  Without this, anyone POSTing a slot the grid never offered
+    # could put a 1-1 call in the middle of a hundred-seat conference.
+    for busy_start, busy_end in conference_intervals(db, start, slot_end):
+        if busy_start < slot_end and busy_end > start:
+            raise SlotNotBookable(
+                f"slot {start.isoformat()} overlaps a ticketed conference"
             )
 
     # 4. insert under the partial unique index — the real double-booking guard

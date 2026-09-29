@@ -19,7 +19,7 @@ import shutil
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -70,16 +70,17 @@ from fastapi.testclient import TestClient  # noqa: E402
 from freezegun import freeze_time  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
-from app.db import SessionLocal, engine  # noqa: E402
+from app.db import SessionLocal, engine, utcnow  # noqa: E402
 from app.deps import (  # noqa: E402
     get_calendar_gateway,
     get_email_sender,
     get_payment_gateway,
 )
 from app.main import app as fastapi_app  # noqa: E402
-from app.models import Base, EventType  # noqa: E402
+from app.models import Base, ConferenceEvent, EventType  # noqa: E402
 from app.rate_limit import LIMITERS  # noqa: E402
 from app.seed import seed  # noqa: E402
+from app.services.conference import create_event  # noqa: E402
 from tests.fakes import (  # noqa: E402
     FakeCalendarGateway,
     FakePaymentGateway,
@@ -179,6 +180,28 @@ def event_type(db_session: Session) -> EventType:
     db_session.commit()
     db_session.refresh(seeded)
     return seeded
+
+
+@pytest.fixture
+def conference(db_session: Session) -> ConferenceEvent:
+    """A sellable conference: ¥50/seat, 100 seats, 60 min, meeting link pasted.
+
+    Built through the service, so it has the same shape the admin API produces —
+    including the ``join_url`` that :meth:`ConferenceEvent.is_on_sale` requires.
+    Scheduled **relative to now** rather than at a fixed date: `is_on_sale` demands
+    a future start, so a hard-coded date would quietly stop being sellable and take
+    a dozen unrelated tests with it.
+    """
+    return create_event(
+        db_session,
+        title="出海获客公开课",
+        description="一小时线上会议，聚焦出海获客的实操方法。",
+        starts_at=utcnow() + timedelta(days=14),
+        price_fen=5000,  # ¥50 — D6
+        capacity=100,
+        join_url="https://meeting.tencent.com/dm/TESTROOM",
+        join_note="会议号 123 456 789",
+    )
 
 
 # ---------------------------------------------------------------------------

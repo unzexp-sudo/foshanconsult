@@ -26,7 +26,10 @@ STATIC_DIR = Path(__file__).parent / "static"
 _ROUTERS: tuple[tuple[str, str, str], ...] = (
     ("app.routers.pages", "router", "M5 pages"),
     ("app.routers.booking", "router", "M1 booking"),
+    ("app.routers.conferences", "router", "conferences"),
     ("app.routers.payments", "router", "M2 payments"),
+    # Last: `admin` imports the conference router's public-shape builder, so it
+    # must not be the reason that module fails to register.
     ("app.routers.admin", "router", "M1 admin"),
 )
 

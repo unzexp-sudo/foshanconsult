@@ -112,6 +112,10 @@ a:hover {
 }
 
 .brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
   padding: 8px 0 24px;
 }
 .brand-link {
@@ -121,6 +125,23 @@ a:hover {
   display: block;
   width: 96px;
   height: 28px;
+}
+
+.nav {
+  display: flex;
+  gap: 4px;
+}
+.nav-link {
+  padding: 7px 10px;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.875rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.nav-link:hover {
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 .main {
@@ -556,4 +577,116 @@ textarea::placeholder {
     flex: 0 1 auto;
     min-width: 200px;
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * Ticketed conferences (contract §14.4)
+ *
+ * The seat meter is the one thing a buyer needs before deciding, so it is a real
+ * element with an accessible label rather than a bare percentage in text.
+ * ------------------------------------------------------------------------- */
+
+.conf-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 14px;
+}
+.conf-card {
+  margin: 0;
+}
+.conf-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.conf-title {
+  margin: 0;
+  font-size: 1.0625rem;
+  line-height: 1.35;
+}
+.conf-when {
+  margin: 6px 0 0;
+  color: var(--text);
+  font-size: 0.9375rem;
+  font-variant-numeric: tabular-nums;
+}
+.conf-price {
+  margin: 10px 0 0;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.badge {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.badge-ok {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.badge-off {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+/* Scheduled but not yet sellable — neither "open" nor "closed", so it gets its
+   own tone rather than borrowing one of the two and lying. */
+.badge-soon {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.conf-counts {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+}
+.conf-counts strong {
+  color: var(--text);
+}
+.conf-meter {
+  height: 6px;
+  margin-top: 7px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.conf-meter-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+/* The join link is the payoff of a ticket, so it gets its own block rather than
+   sitting in the facts list where it would read like metadata. */
+.join-box {
+  margin: 14px 0 6px;
+  padding: 14px;
+  background: var(--accent-soft);
+  border-radius: var(--radius-sm);
+}
+.join-label {
+  margin: 0 0 8px;
+  color: var(--accent-strong);
+  font-size: 0.8125rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+.join-box .btn {
+  width: 100%;
+}
+.join-box .hint {
+  margin: 8px 0 0;
 }

@@ -5,7 +5,7 @@ Three plain, synchronously-callable functions.  Dev runs them inline from FastAP
 tasks.  Importing this module must never require Redis and must never open a
 connection, so the Celery app is built lazily and only when a broker is configured.
 
-Marker conventions — both are load-bearing:
+Marker conventions — all three are load-bearing:
 
 * ``Booking.calendar_event_id`` is the *outstanding calendar work* marker.  A non-null
   value on an ``expired`` row means "this hold still needs releasing".  Once the
@@ -18,6 +18,11 @@ Marker conventions — both are load-bearing:
   "never held" — so a booking whose hold was released before a late payment landed
   got no calendar event and no email at all, silently.  Keeping the two ideas in one
   column is what produced that bug; do not re-merge them.
+* ``ConferenceSeat.ticket_sent_at`` is this table's counterpart to
+  ``finalized_at``, and it guards a *secret*: the ticket email carries the join
+  link, so a replayed notify that emailed twice would hand out a second copy of it.
+  A conference has no calendar marker at all — the event belongs to the owner, not
+  to us — which is why this marker is the only one it needs.
 
 Correctness never depends on any of this: §7's lazy expiry and the transactional
 pre-insert sweep free slots on their own.  These tasks are hygiene only.
@@ -26,7 +31,7 @@ pre-insert sweep free slots on their own.  These tasks are hygiene only.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -35,7 +40,13 @@ from sqlalchemy import select
 from app import deps
 from app.config import settings
 from app.db import session_scope, utcnow
-from app.models import Booking, BookingStatus, EventType
+from app.models import (
+    Booking,
+    BookingStatus,
+    ConferenceEvent,
+    ConferenceSeat,
+    EventType,
+)
 from app.services.booking import booking_summary
 
 logger = logging.getLogger("booking")
@@ -43,6 +54,7 @@ logger = logging.getLogger("booking")
 __all__ = [
     "celery_app",
     "finalize_paid_booking",
+    "finalize_ticket",
     "release_booking_hold",
     "release_expired_holds",
 ]
@@ -217,6 +229,118 @@ def _confirmation_email(booking: Booking) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# §14.4 — finalize a paid conference seat
+# ---------------------------------------------------------------------------
+
+
+def finalize_ticket(seat_id: str) -> None:
+    """Email the attendee their ticket and join link, once.
+
+    Dispatched from a FastAPI ``BackgroundTask`` after the notify response has
+    already been sent, so it must never raise — same contract as
+    :func:`finalize_paid_booking`.  Idempotent by the ``ticket_sent_at`` marker.
+
+    There is **no calendar step here**, unlike :func:`finalize_paid_booking`.  A
+    conference is one event the owner created in their own meeting platform, not a
+    hold we placed on their behalf, so there is nothing to confirm and nothing to
+    release.  The email is the whole job.
+    """
+    try:
+        _finalize_ticket(seat_id)
+    except Exception:  # noqa: BLE001 - a background task must never break the response
+        logger.exception("finalize_ticket failed for seat %s", seat_id)
+
+
+def _finalize_ticket(seat_id: str) -> None:
+    email = deps.get_email_sender()
+
+    # Any exception here propagates out of the ``with``, so ``session_scope`` rolls
+    # back and the marker stays unset — the ticket is retried rather than lost.
+    with session_scope() as db:
+        seat = db.get(ConferenceSeat, seat_id)
+        if seat is None:
+            logger.warning("finalize_ticket: seat %s not found", seat_id)
+            return
+        if seat.status is not BookingStatus.PAID:
+            return
+        if seat.ticket_sent_at is not None:
+            return  # already emailed — never send the join link a second time
+
+        event = db.get(ConferenceEvent, seat.conference_event_id)
+        if event is None:
+            # Unreachable through the FK, but it would mean a paid customer we
+            # cannot tell where to go.  Leave the marker unset so a retry can
+            # still send, and say so loudly.
+            logger.error(
+                "finalize_ticket: seat %s references missing conference %s; "
+                "no ticket sent",
+                seat.reference,
+                seat.conference_event_id,
+            )
+            return
+
+        if not event.join_url:
+            # The owner scheduled the event without pasting a link.  The seat is
+            # paid and the email is about to go out without the one thing it is
+            # for — a work item for a human, not something to swallow.
+            logger.error(
+                "finalize_ticket: conference %s has no join_url; ticket %s is paid "
+                "and cannot carry a meeting link — the owner must send it by hand",
+                event.id,
+                seat.reference,
+            )
+
+        subject, body = _ticket_email(seat, event)
+        email.send(to=seat.customer_email, subject=subject, body=body)
+
+        seat.ticket_sent_at = utcnow()
+
+
+def _ticket_email(seat: ConferenceSeat, event: ConferenceEvent) -> tuple[str, str]:
+    """Chinese ticket subject and body.
+
+    The join link is the point of this email **and it is a secret**: it is
+    delivered here, after a verified payment, and deliberately appears on no page
+    or endpoint reachable before one.  Never move it into the confirmation page,
+    the public API, or a log line.
+
+    Times render in the conference's own timezone, never the server's — the same
+    rule the booking email follows.  Note that this prints the raw IANA name
+    (``Asia/Shanghai``) rather than the Chinese label the pages show
+    (``北京时间``); that is what the existing booking email does, and changing it
+    is a product decision, not a formatting one.
+    """
+    tz = ZoneInfo(event.timezone)
+    start = _as_utc(event.starts_at).astimezone(tz)
+    end = start + timedelta(minutes=event.duration_minutes)
+    yuan = f"¥{seat.amount_fen // 100}.{seat.amount_fen % 100:02d}"
+    link = f"{settings.public_base_url.rstrip('/')}/ticket/{seat.reference}"
+
+    subject = f"报名确认 · {event.title} · {seat.reference}"
+    lines = [
+        f"{seat.customer_name}，您好：",
+        "",
+        f"您已成功报名「{event.title}」，座位已为您保留。",
+        "",
+        f"票号：{seat.reference}（第 {seat.seat_no} 号座位）",
+        f"时间：{start:%Y-%m-%d %H:%M}–{end:%H:%M}（{event.timezone}）",
+        f"金额：{yuan}",
+        "",
+        "会议链接：",
+        event.join_url or "（主办方将尽快通过邮件另行发送）",
+    ]
+    if event.join_note:
+        lines += ["", f"入会说明：{event.join_note}"]
+    lines += [
+        "",
+        f"详情：{link}",
+        "",
+        "建议提前几分钟进入会议。如需协助，请直接回复本邮件。",
+    ]
+    return subject, "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # §10 — release a single hold (cancel path)
 # ---------------------------------------------------------------------------
 
@@ -265,7 +389,12 @@ def _build_celery_app() -> Any:
         broker=settings.celery_broker_url,
         backend=settings.celery_result_backend or None,
     )
-    for func in (release_expired_holds, finalize_paid_booking, release_booking_hold):
+    for func in (
+        release_expired_holds,
+        finalize_paid_booking,
+        finalize_ticket,
+        release_booking_hold,
+    ):
         # Registers under the frozen name but leaves the module attribute as the plain
         # function, which is what dev and the tests call.
         app.task(name=f"app.tasks.{func.__name__}")(func)

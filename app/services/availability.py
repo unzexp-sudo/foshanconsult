@@ -11,8 +11,9 @@ Two ideas do all the work:
   :func:`effective_step_minutes` for the step rule and the drop-overlapping pass
   at the end of :func:`generate_slots`;
 * a slot is offered only if it overlaps neither calendar busy time (expanded by
-  the buffers) nor a *live* booking — where "live" applies lazy expiry, so an
-  expired ``pending_payment`` hold never occupies its slot.
+  the buffers), nor a *live* booking — where "live" applies lazy expiry, so an
+  expired ``pending_payment`` hold never occupies its slot — nor a ticketed
+  conference window (:func:`conference_intervals`).
 """
 
 from __future__ import annotations
@@ -26,11 +27,12 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import utcnow
-from app.models import AvailabilityRule, Booking, BookingStatus, EventType
+from app.models import AvailabilityRule, Booking, BookingStatus, ConferenceEvent, EventType
 from app.ports.calendar import CalendarGateway
 
 __all__ = [
     "Slot",
+    "conference_intervals",
     "effective_step_minutes",
     "generate_slots",
     "is_slot_on_grid",
@@ -202,6 +204,50 @@ def is_slot_on_grid(
     return False
 
 
+def conference_intervals(
+    db: Session, start: datetime, end: datetime
+) -> list[tuple[datetime, datetime]]:
+    """Ticketed conference windows overlapping ``[start, end)``, as aware UTC.
+
+    A conference is the owner's own time and blocks as hard as a calendar
+    commitment — harder, arguably: it cannot be moved once a hundred people have
+    paid for it.  Reported as intervals so both callers can treat it exactly like
+    calendar busy time: :func:`generate_slots` hides the slots it covers, and
+    :func:`~app.services.booking.create_booking` refuses them.  That symmetry is
+    the point — this project has already been bitten twice by a grid and a write
+    path disagreeing about what is bookable.
+
+    Cancelled events are excluded; a past one needs no special case, since its
+    window cannot overlap anything in the future.
+
+    ``active`` is deliberately **not** filtered on.  An event that is off sale but
+    not cancelled is still a meeting the owner is holding, so it keeps blocking
+    1-1 time — blocking a slot that turns out to be free is visible and fixable,
+    whereas a 1-1 booked in the middle of a conference the owner is hosting is
+    not.  :func:`~app.services.conference.cancel_event` sets both flags, so a
+    properly cancelled event does stop blocking.
+
+    The SQL bound is deliberately coarse (24 hours before the window) because a
+    conference's end is derived from its duration rather than stored; the exact
+    overlap test happens in Python.
+    """
+    rows = db.execute(
+        select(ConferenceEvent.starts_at, ConferenceEvent.duration_minutes).where(
+            ConferenceEvent.cancelled_at.is_(None),
+            ConferenceEvent.starts_at >= start - timedelta(hours=24),
+            ConferenceEvent.starts_at < end,
+        )
+    ).all()
+
+    intervals: list[tuple[datetime, datetime]] = []
+    for starts_at, duration_minutes in rows:
+        window_start = _as_utc(starts_at)
+        window_end = window_start + timedelta(minutes=duration_minutes)
+        if window_start < end and window_end > start:
+            intervals.append((window_start, window_end))
+    return intervals
+
+
 def generate_slots(
     db: Session,
     event_type: EventType,
@@ -243,6 +289,15 @@ def generate_slots(
         if (_as_utc(interval.start), _as_utc(interval.end)) not in owned
     ]
 
+    # A ticketed conference is the owner's own time and blocks just as hard as a
+    # calendar commitment — harder, arguably, since it cannot be moved once a
+    # hundred people have paid.  Kept apart from `expanded_busy` because only the
+    # calendar's busy time takes the 1-1 buffers: a conference window is exactly
+    # the meeting, and padding it would hide slots the owner never asked to hide.
+    # `create_booking` applies the same rule, so the grid and the write path
+    # cannot disagree about what a conference covers.
+    blocked = expanded_busy + conference_intervals(db, day_start - pad, day_end + pad)
+
     # Live = paid, or a pending hold that has not expired yet (lazy expiry §7.1).
     live = (Booking.status == BookingStatus.PAID) | (
         (Booking.status == BookingStatus.PENDING_PAYMENT) & (Booking.expires_at > moment)
@@ -267,8 +322,7 @@ def generate_slots(
                 continue
             end = candidate + duration
             overlaps_busy = any(
-                candidate < busy_end and end > busy_start
-                for busy_start, busy_end in expanded_busy
+                candidate < busy_end and end > busy_start for busy_start, busy_end in blocked
             )
             if overlaps_busy:
                 continue

@@ -8,6 +8,9 @@ What is throttled, and why:
 
 * ``POST /api/bookings`` — the expensive one.  A calendar hold **and** a WeChat
   order per accepted call.
+* ``POST /api/conferences/{id}/seats`` — a WeChat order per accepted call, and no
+  calendar hold to unwind, which makes it the cheaper one to spam.  Its own scope
+  so a run on conference tickets cannot exhaust a visitor's booking budget.
 * ``GET /api/slots`` — one calendar fan-out per call.  This is *beyond* what §10
   asks for; it is here because exhausting the freebusy quota breaks booking for
   everybody, and the limit is deliberately loose enough that a human browsing a
@@ -50,6 +53,7 @@ __all__ = [
     "client_ip",
     "limit_dependency",
     "rate_limit_bookings",
+    "rate_limit_seats",
     "rate_limit_slots",
 ]
 
@@ -167,9 +171,18 @@ def limit_dependency(
 
 bookings_limiter = FixedWindowLimiter(settings.rate_limit_bookings_per_hour)
 slots_limiter = FixedWindowLimiter(settings.rate_limit_slots_per_hour)
+#: A seat reservation creates a WeChat order per accepted call, exactly as
+#: ``POST /api/bookings`` does, so it gets the same budget under its own scope.
+#: Separate scope, same limit: a shared key would let a burst of conference buys
+#: lock a visitor out of booking a 1-1.
+seats_limiter = FixedWindowLimiter(settings.rate_limit_bookings_per_hour)
 
 #: Every limiter, so the test suite can reset all of them in one call.
-LIMITERS: tuple[FixedWindowLimiter, ...] = (bookings_limiter, slots_limiter)
+LIMITERS: tuple[FixedWindowLimiter, ...] = (
+    bookings_limiter,
+    slots_limiter,
+    seats_limiter,
+)
 
 rate_limit_bookings = limit_dependency(
     "bookings",
@@ -179,5 +192,10 @@ rate_limit_bookings = limit_dependency(
 rate_limit_slots = limit_dependency(
     "slots",
     slots_limiter,
+    trusted_proxy_depth=settings.trusted_proxy_depth,
+)
+rate_limit_seats = limit_dependency(
+    "seats",
+    seats_limiter,
     trusted_proxy_depth=settings.trusted_proxy_depth,
 )
